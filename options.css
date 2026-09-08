@@ -671,7 +671,7 @@ footer {
 
 @media (min-width: 1000px) {
   .provider-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
   }
 
   .provider-grid--two {
@@ -749,6 +749,11 @@ footer {
 
 .field-label a:hover {
   text-decoration: underline;
+}
+
+.field-label-optional {
+  font-weight: 400;
+  color: var(--text-muted);
 }
 
 .provider-card .api-key-input,

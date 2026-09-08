@@ -248,6 +248,7 @@
             <option value="gemini">Gemini (cloud)</option>
             <option value="chrome-ai">Chrome built-in AI (on-device)</option>
             <option value="local">Loopback model server — Ollama / LM Studio</option>
+            <option value="custom-openai">OpenAI Compatible API Host</option>
           </select>
         </div>
 
@@ -288,6 +289,25 @@
             <label class="field-label" for="geminiModel">Model</label>
             <select id="geminiModel" class="provider-select" aria-describedby="geminiModelRecommended"></select>
             <p class="model-recommended-hint" id="geminiModelRecommended"></p>
+          </div>
+
+          <div class="provider-card" data-provider="custom-openai">
+            <div class="provider-card-header">OpenAI Compatible <span class="primary-badge">Primary</span></div>
+            <p class="provider-card-desc">Connect to any provider that implements the OpenAI-compatible API, such as OpenRouter, Together AI, or a self-hosted server.</p>
+            <label class="field-label" for="customOpenaiBaseUrl">Base URL</label>
+            <input type="text" id="customOpenaiBaseUrl" class="api-key-input" placeholder="https://api.example.com/v1" spellcheck="false">
+            <label class="field-label" for="customOpenaiKey">API key <span class="field-label-optional">(optional)</span></label>
+            <div class="input-with-toggle">
+              <input type="password" id="customOpenaiKey" class="api-key-input" placeholder="sk-...">
+              <button type="button" class="toggle-password" aria-label="Show key" title="Show key"><span class="eye-icon" aria-hidden="true"></span></button>
+            </div>
+            <label class="field-label" for="customOpenaiModel">Model name</label>
+            <input type="text" id="customOpenaiModel" class="api-key-input" placeholder="e.g. meta-llama/Llama-3-70b-chat-hf" list="customOpenaiModels" spellcheck="false" autocomplete="off">
+            <datalist id="customOpenaiModels"></datalist>
+            <div class="local-model-buttons">
+              <button type="button" id="testCustomOpenaiBtn" class="btn btn-secondary">Fetch models</button>
+            </div>
+            <div id="customOpenaiStatus" class="status"></div>
           </div>
         </div>
 

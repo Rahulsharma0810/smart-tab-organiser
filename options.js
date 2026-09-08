@@ -28,6 +28,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const localModelInput = document.getElementById('localModel');
   const testLocalModelBtn = document.getElementById('testLocalModelBtn');
   const localModelStatus = document.getElementById('localModelStatus');
+  const customOpenaiBaseUrlInput = document.getElementById('customOpenaiBaseUrl');
+  const customOpenaiKeyInput = document.getElementById('customOpenaiKey');
+  const customOpenaiModelInput = document.getElementById('customOpenaiModel');
+  const testCustomOpenaiBtn = document.getElementById('testCustomOpenaiBtn');
+  const customOpenaiStatus = document.getElementById('customOpenaiStatus');
+  const customOpenaiModelsList = document.getElementById('customOpenaiModels');
   const checkChromeAiBtn = document.getElementById('checkChromeAiBtn');
   const downloadChromeAiBtn = document.getElementById('downloadChromeAiBtn');
   const chromeAiStatus = document.getElementById('chromeAiStatus');
@@ -306,7 +312,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 'pinnedUrls',
     'githubToken', 'prGroupEnabled', 'prGroupColor', 'closedIssueGroupEnabled',
     'githubLabelGroupsEnabled', 'githubLabelGroupsOnClick', 'githubLabelGroupNames', 'githubLabelGroupColors',
-    'bookmarksGroupColor', 'localBaseUrl', 'localModel'
+    'bookmarksGroupColor', 'localBaseUrl', 'localModel',
+    'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel'
   ]);
   ignoreQueryCheckbox.checked = settings.ignoreQuery !== false; // default to true
   ignoreHashCheckbox.checked = settings.ignoreHash !== false; // default to true
@@ -330,6 +337,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const geminiResolved = globalThis.populateModelSelect(geminiModelSelect, 'gemini', settings.geminiModel);
   localBaseUrlInput.value = settings.localBaseUrl || '';
   localModelInput.value = settings.localModel || '';
+  customOpenaiBaseUrlInput.value = settings.customOpenaiBaseUrl || '';
+  customOpenaiKeyInput.value = settings.customOpenaiKey || '';
+  customOpenaiModelInput.value = settings.customOpenaiModel || '';
   updateModelRecommendedHint('openai', openaiModelRecommendedEl, openaiModelSelect);
   updateModelRecommendedHint('claude', claudeModelRecommendedEl, claudeModelSelect);
   updateModelRecommendedHint('gemini', geminiModelRecommendedEl, geminiModelSelect);
@@ -408,12 +418,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.storage.local.set({ geminiKey: geminiKeyInput.value.trim() });
   });
   
+  customOpenaiKeyInput.addEventListener('input', () => {
+    chrome.storage.local.set({ customOpenaiKey: customOpenaiKeyInput.value.trim() });
+  });
+  
   const PROVIDER_LABELS_OPTIONS = {
     openai: 'OpenAI',
     claude: 'Claude',
     gemini: 'Gemini',
     'chrome-ai': 'Chrome built-in AI',
-    local: 'Loopback model server'
+    local: 'Loopback model server',
+    'custom-openai': 'OpenAI Compatible API Host'
   };
   const LOCAL_PROVIDERS_OPTIONS = ['chrome-ai', 'local'];
 
@@ -431,8 +446,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function updateActiveProviderCard() {
     const primary = aiProviderSelect.value || 'openai';
+    const isCloudPrimary = !LOCAL_PROVIDERS_OPTIONS.includes(primary);
     providerCards.forEach((card) => {
-      card.classList.toggle('provider-card--active', card.dataset.provider === primary);
+      const isSelected = card.dataset.provider === primary;
+      card.classList.toggle('provider-card--active', isSelected);
+      // Local provider cards always stay visible. Cloud cards show only the selected
+      // provider, except when the primary is local and cloud fallback needs keys.
+      const isCloud = !card.closest('.provider-grid--two');
+      card.hidden = isCloud && isCloudPrimary && !isSelected;
     });
   }
 
@@ -531,7 +552,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (desc.chain.length > 1) {
       parts.push('Cloud primaries never fall back to local providers.');
     } else {
-      parts.push('Add an OpenAI, Claude or Gemini API key above to enable automatic fallback.');
+      parts.push('Add an OpenAI, Claude, Gemini or OpenAI Compatible key above to enable automatic fallback.');
     }
     aiFallbackHintEl.textContent = parts.join(' ');
   }
@@ -582,7 +603,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Refresh when an API key changes (fallback eligibility depends on which keys are present)
-  [openaiKeyInput, claudeKeyInput, geminiKeyInput].forEach((input) => {
+  [openaiKeyInput, claudeKeyInput, geminiKeyInput, customOpenaiKeyInput].forEach((input) => {
     input.addEventListener('input', scheduleFallbackUiRefresh);
   });
   refreshProviderUi();
@@ -594,6 +615,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   localModelInput.addEventListener('input', () => {
     chrome.storage.local.set({ localModel: localModelInput.value.trim() });
     scheduleFallbackUiRefresh(); // the local fallback chain depends on a model name being set
+  });
+
+  customOpenaiBaseUrlInput.addEventListener('input', () => {
+    chrome.storage.local.set({ customOpenaiBaseUrl: customOpenaiBaseUrlInput.value.trim() });
+    scheduleFallbackUiRefresh();
+  });
+
+  customOpenaiModelInput.addEventListener('input', () => {
+    chrome.storage.local.set({ customOpenaiModel: customOpenaiModelInput.value.trim() });
+    scheduleFallbackUiRefresh();
   });
 
   // Ask the service worker to check the local server, so the result reflects
@@ -627,6 +658,57 @@ document.addEventListener('DOMContentLoaded', async () => {
       localModelStatus.className = 'status error';
     } finally {
       testLocalModelBtn.disabled = false;
+    }
+  });
+
+  // Ask the service worker to test the OpenAI-compatible host, so the result
+  // reflects the context that actually organizes tabs.
+  testCustomOpenaiBtn.addEventListener('click', async () => {
+    testCustomOpenaiBtn.disabled = true;
+    customOpenaiStatus.textContent = 'Testing connection...';
+    customOpenaiStatus.className = 'status info';
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: 'testCustomOpenAI',
+        baseUrl: customOpenaiBaseUrlInput.value.trim(),
+        apiKey: customOpenaiKeyInput.value.trim()
+      });
+      if (!result) {
+        customOpenaiStatus.textContent =
+          'No response from the service worker. Reload the extension (chrome://extensions → refresh) and try again.';
+        customOpenaiStatus.className = 'status error';
+        return;
+      }
+      if (!result.success) {
+        customOpenaiStatus.textContent = result.error || 'Could not reach the OpenAI-compatible host';
+        customOpenaiStatus.className = 'status error';
+        return;
+      }
+      if (result.models.length === 0) {
+        customOpenaiStatus.textContent = `Connected to ${result.baseUrl}, but no models were listed.`;
+        customOpenaiStatus.className = 'status error';
+        return;
+      }
+      // Populate the model dropdown (combobox) with the upstream catalog.
+      customOpenaiModelsList.textContent = '';
+      for (const model of result.models) {
+        const option = document.createElement('option');
+        option.value = model;
+        customOpenaiModelsList.append(option);
+      }
+      const chosen = customOpenaiModelInput.value.trim();
+      const known = result.models.includes(chosen);
+      const preview = result.models.slice(0, 8).join(', ');
+      const more = result.models.length > 8 ? ` … and ${result.models.length - 8} more` : '';
+      customOpenaiStatus.textContent =
+        `Connected to ${result.baseUrl}. ${result.models.length} models available (${preview}${more}).` +
+        (chosen && !known ? ` Warning: "${chosen}" is not in that list.` : '');
+      customOpenaiStatus.className = chosen && !known ? 'status info' : 'status success';
+    } catch (error) {
+      customOpenaiStatus.textContent = 'Error: ' + error.message;
+      customOpenaiStatus.className = 'status error';
+    } finally {
+      testCustomOpenaiBtn.disabled = false;
     }
   });
 

@@ -401,7 +401,8 @@ const PROVIDER_LABELS = {
   claude: 'Claude',
   gemini: 'Gemini',
   'chrome-ai': 'Chrome built-in AI',
-  local: 'Loopback model server'
+  local: 'Loopback model server',
+  'custom-openai': 'OpenAI Compatible API Host'
 };
 // Providers that the extension contacts only on this computer.
 const LOCAL_PROVIDERS = ['chrome-ai', 'local'];
@@ -2946,6 +2947,128 @@ async function callLocalModel(rawBaseUrl, model, tabs, customInstructions, exist
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI-compatible API host (any remote provider)
+// ---------------------------------------------------------------------------
+
+const CUSTOM_OPENAI_TIMEOUT_MS = 180000;
+
+/**
+ * Normalize a user-entered OpenAI-compatible host address into a base URL.
+ * Accepts "https://host", "host/v1", "https://host/v1/", with or without scheme or /v1.
+ */
+function normalizeCustomOpenAIBaseUrl(rawUrl) {
+  let url = (rawUrl || '').trim();
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+  url = url.replace(/\/+$/, '');
+  // Strip a full endpoint path if the user pasted one, then ensure the /v1 prefix.
+  url = url.replace(/\/chat\/completions$/, '');
+  if (!/\/v\d+$/.test(url)) {
+    url = `${url}/v1`;
+  }
+  return url;
+}
+
+/** List the models an OpenAI-compatible host currently has available (for the Test connection button). */
+async function listCustomOpenAIModels(rawBaseUrl, apiKey) {
+  const baseUrl = normalizeCustomOpenAIBaseUrl(rawBaseUrl);
+  if (!baseUrl) throw new Error('Enter a base URL for the OpenAI-compatible host first.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  try {
+    const response = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`OpenAI-compatible host returned ${response.status} for ${baseUrl}/models`);
+    }
+    const data = await response.json();
+    const models = (data.data || data.models || [])
+      .map(m => m.id || m.name)
+      .filter(Boolean)
+      .sort();
+    return { baseUrl, models };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Call any OpenAI-compatible host (OpenRouter, Together AI, a self-hosted server, …) to
+ * categorize tabs. Streaming makes response headers arrive before Chrome's 30-second
+ * service-worker fetch limit. The API key is optional — some hosts need none.
+ * Less reliable at emitting bare JSON, so one stricter retry is attempted.
+ */
+async function callCustomOpenAI(rawBaseUrl, apiKey, model, tabs, customInstructions, existingGroups = null, minGroupSize = 1) {
+  const baseUrl = normalizeCustomOpenAIBaseUrl(rawBaseUrl);
+  if (!baseUrl) throw new Error('No OpenAI-compatible base URL configured.');
+  if (!model?.trim()) throw new Error('No model name configured for the OpenAI-compatible host.');
+  const basePrompt = buildOrganizePrompt(tabs, customInstructions, existingGroups, minGroupSize);
+  const retryReminder = '\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON array: start with [ and end with ]. No explanation, no markdown code fences.';
+
+  let lastError = null;
+  const deadline = Date.now() + CUSTOM_OPENAI_TIMEOUT_MS;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const prompt = attempt === 0 ? basePrompt : basePrompt + retryReminder;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`OpenAI-compatible host timed out after ${Math.round(CUSTOM_OPENAI_TIMEOUT_MS / 1000)}s.`);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remainingMs);
+
+    let content;
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 5000,
+          temperature: 0.2,
+          stream: true
+        })
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
+        console.error('[Smart Tab Organiser] OpenAI-compatible host error:', response.status, error);
+        throw new Error(error.error?.message || error.message || `OpenAI-compatible host returned ${response.status}`);
+      }
+      content = await readOpenAiCompatibleChatResponse(response);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new Error(`OpenAI-compatible host timed out after ${Math.round(CUSTOM_OPENAI_TIMEOUT_MS / 1000)}s.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!content) {
+      lastError = new Error(`No response from OpenAI-compatible host model "${model}"`);
+      continue;
+    }
+
+    const groups = parseAiGroupsResponse(content);
+    if (!groups) {
+      console.warn('[Smart Tab Organiser] OpenAI-compatible host: invalid format. Content preview:', content.slice(0, 200));
+      lastError = new Error(`Invalid response format from OpenAI-compatible host model "${model}"`);
+      continue;
+    }
+    return groups;
+  }
+
+  throw lastError || new Error('OpenAI-compatible host produced no usable response');
+}
+
+// ---------------------------------------------------------------------------
 // Chrome built-in AI (Gemini Nano, on-device via the Prompt API)
 // ---------------------------------------------------------------------------
 
@@ -3174,6 +3297,14 @@ async function callProvider(provider, settings, tabs, instructions, existingGrou
       const baseUrl = settings.localBaseUrl?.trim() || DEFAULT_OLLAMA_BASE_URL;
       return await callLocalModel(baseUrl, model, promptTabs, instructions, existingGroupsForAI, minTabs);
     }
+    if (provider === 'custom-openai') {
+      const baseUrl = settings.customOpenaiBaseUrl?.trim();
+      if (!baseUrl) throw new AiProviderError({ provider, message: 'No OpenAI-compatible base URL configured' });
+      const model = settings.customOpenaiModel?.trim();
+      if (!model) throw new AiProviderError({ provider, message: 'No model name configured for the OpenAI-compatible host' });
+      const key = settings.customOpenaiKey?.trim();
+      return await callCustomOpenAI(baseUrl, key, model, promptTabs, instructions, existingGroupsForAI, minTabs);
+    }
     throw new AiProviderError({ provider, message: `Unknown AI provider: ${provider}` });
   } catch (err) {
     if (err instanceof AiProviderError) throw err;
@@ -3185,6 +3316,10 @@ function providerHasKey(provider, settings) {
   if (provider === 'openai') return !!settings.openaiKey?.trim();
   if (provider === 'claude') return !!settings.claudeKey?.trim();
   if (provider === 'gemini') return !!settings.geminiKey?.trim();
+  if (provider === 'custom-openai') {
+    // The API key is optional; the host is usable once it has a base URL and a model name.
+    return !!(settings.customOpenaiBaseUrl?.trim() && settings.customOpenaiModel?.trim());
+  }
   return false;
 }
 
@@ -3192,12 +3327,13 @@ function providerHasKey(provider, settings) {
 function providerIsConfigured(provider, settings) {
   if (provider === 'chrome-ai') return true; // no key or name; availability is checked at call time
   if (provider === 'local') return !!settings.localModel?.trim();
+  if (provider === 'custom-openai') return !!settings.customOpenaiBaseUrl?.trim();
   return providerHasKey(provider, settings);
 }
 
 // The user's preferred fallback order (Options → Fallback order). Unknown entries are
 // dropped and missing providers appended, so old or partial saved values stay valid.
-const DEFAULT_FALLBACK_ORDER = ['chrome-ai', 'local', 'openai', 'claude', 'gemini'];
+const DEFAULT_FALLBACK_ORDER = ['chrome-ai', 'local', 'openai', 'claude', 'gemini', 'custom-openai'];
 
 function normalizeFallbackOrder(saved) {
   const seen = new Set();
@@ -3288,7 +3424,8 @@ async function organizeTabs(
     const settings = await chrome.storage.local.get([
       'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled', 'aiAllowCloudFallback',
       'aiFallbackOrder', 'openaiModel', 'claudeModel', 'geminiModel', 'customInstructionsOptions',
-      'localBaseUrl', 'localModel', 'closedIssueGroupEnabled', 'githubLabelGroupsEnabled',
+      'localBaseUrl', 'localModel', 'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel',
+      'closedIssueGroupEnabled', 'githubLabelGroupsEnabled',
       'githubLabelGroupNames', 'githubManagedLabelGroupNamesByWindow'
     ]);
 
@@ -3887,13 +4024,21 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'testCustomOpenAI') {
+    listCustomOpenAIModels(request.baseUrl, request.apiKey || '')
+      .then(result => sendResponse({ success: true, ...result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   // The options page renders the fallback order and hint from this, so what the user
   // sees is exactly the chain organizeTabs would run — one source of truth.
   if (request.action === 'describeProviderChain') {
     (async () => {
       const settings = await chrome.storage.local.get([
         'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled',
-        'aiAllowCloudFallback', 'aiFallbackOrder', 'localModel'
+        'aiAllowCloudFallback', 'aiFallbackOrder', 'localModel',
+        'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel'
       ]);
       return describeProviderChain(settings);
     })()

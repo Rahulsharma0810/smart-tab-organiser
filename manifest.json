@@ -17,7 +17,9 @@
     "https://generativelanguage.googleapis.com/*",
     "https://api.github.com/*",
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://*/*",
+    "http://*/*"
   ],
   "action": {
     "default_icon": {

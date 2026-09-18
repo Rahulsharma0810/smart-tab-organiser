@@ -70,6 +70,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const mergeIntoExistingCheckbox = document.getElementById('mergeIntoExisting');
   const sortTabsWithinGroupsByTitleCheckbox = document.getElementById('sortTabsWithinGroupsByTitle');
   const organizeOnClickCheckbox = document.getElementById('organizeOnClick');
+  const autoOrganizeEnabledCheckbox = document.getElementById('autoOrganizeEnabled');
+  const autoOrganizeDelayInput = document.getElementById('autoOrganizeDelay');
+  const autoOrganizeDelayRow = document.getElementById('autoOrganizeDelayRow');
   const organizeTabsBtn = document.getElementById('organizeTabsBtn');
   const tidyPinnedBtn = document.getElementById('tidyPinnedBtn');
   const ungroupTabsBtn = document.getElementById('ungroupTabsBtn');
@@ -309,7 +312,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     'ignoreQuery', 'ignoreHash', 'reloadTabs',
     'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled', 'aiAllowCloudFallback',
     'openaiModel', 'claudeModel', 'geminiModel', 'customInstructionsOptions',
-    'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 'pinnedUrls',
+    'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 
+    'autoOrganizeEnabled', 'autoOrganizeDelay', 'pinnedUrls',
     'githubToken', 'prGroupEnabled', 'prGroupColor', 'closedIssueGroupEnabled',
     'githubLabelGroupsEnabled', 'githubLabelGroupsOnClick', 'githubLabelGroupNames', 'githubLabelGroupColors',
     'bookmarksGroupColor', 'localBaseUrl', 'localModel',
@@ -365,6 +369,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   mergeIntoExistingCheckbox.checked = settings.mergeIntoExisting === true;
   sortTabsWithinGroupsByTitleCheckbox.checked = settings.sortTabsWithinGroupsByTitle === true;
   organizeOnClickCheckbox.checked = settings.organizeOnClick === true;
+  autoOrganizeEnabledCheckbox.checked = settings.autoOrganizeEnabled === true;
+  autoOrganizeDelayInput.value = settings.autoOrganizeDelay || 5;
+  updateAutoOrganizeDelayVisibility();
   if (Array.isArray(settings.pinnedUrls)) {
     pinnedUrlsTextarea.value = settings.pinnedUrls.join('\n');
   }
@@ -799,6 +806,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     preserveGroupsMinTabsWarning.style.display = (!isNaN(n) && n > 3) ? '' : 'none';
   }
 
+  function updateAutoOrganizeDelayVisibility() {
+    const enabled = autoOrganizeEnabledCheckbox.checked;
+    autoOrganizeDelayRow.style.display = enabled ? '' : 'none';
+    autoOrganizeDelayInput.disabled = !enabled;
+  }
+
   preserveGroupsCheckbox.addEventListener('change', () => {
     chrome.storage.local.set({ preserveGroups: preserveGroupsCheckbox.checked });
     updatePreserveGroupsMinTabsVisibility();
@@ -832,6 +845,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   organizeOnClickCheckbox.addEventListener('change', () => {
     chrome.storage.local.set({ organizeOnClick: organizeOnClickCheckbox.checked });
+  });
+
+  autoOrganizeEnabledCheckbox.addEventListener('change', () => {
+    chrome.storage.local.set({ autoOrganizeEnabled: autoOrganizeEnabledCheckbox.checked });
+    updateAutoOrganizeDelayVisibility();
+  });
+
+  autoOrganizeDelayInput.addEventListener('change', () => {
+    const delay = parseInt(autoOrganizeDelayInput.value, 10);
+    if (delay >= 1 && delay <= 60) {
+      chrome.storage.local.set({ autoOrganizeDelay: delay });
+    } else {
+      autoOrganizeDelayInput.value = settings.autoOrganizeDelay || 5;
+    }
   });
 
   pinnedUrlsTextarea.addEventListener('input', () => {

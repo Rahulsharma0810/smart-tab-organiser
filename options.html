@@ -472,6 +472,30 @@
             <span class="slider"></span>
           </label>
         </div>
+        
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label">Auto-organize when new tabs open</label>
+            <p class="setting-description">
+              When enabled, tabs will be automatically organized with AI after new tabs are opened.
+              <br>Organization runs after a brief pause in tab creation to avoid excessive AI calls.
+            </p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="autoOrganizeEnabled">
+            <span class="slider"></span>
+          </label>
+        </div>
+        
+        <div class="setting-item" id="autoOrganizeDelayRow">
+          <div class="setting-info">
+            <label class="setting-label" for="autoOrganizeDelay">Auto-organize delay (seconds)</label>
+            <p class="setting-description">
+              Time to wait after the last tab is created before triggering automatic organization. Recommended: 3-10 seconds.
+            </p>
+          </div>
+          <input type="number" id="autoOrganizeDelay" class="api-key-input" min="1" max="60" step="1" value="5" style="width: 100px;">
+        </div>
       </section>
     </div>
     

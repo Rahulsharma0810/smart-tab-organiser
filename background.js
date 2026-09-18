@@ -961,8 +961,52 @@ function scheduleBadgeUpdate() {
   }, 300);
 }
 
+// Auto-organize tabs when new tabs are created (with debouncing)
+let autoOrganizeTimer = null;
+
+async function scheduleAutoOrganize() {
+  const settings = await chrome.storage.local.get(['autoOrganizeEnabled', 'autoOrganizeDelay']);
+  
+  if (settings.autoOrganizeEnabled !== true) {
+    return;
+  }
+  
+  // Clear existing timer
+  if (autoOrganizeTimer) {
+    clearTimeout(autoOrganizeTimer);
+  }
+  
+  // Get delay in milliseconds (default 5 seconds)
+  const delaySeconds = settings.autoOrganizeDelay || 5;
+  const delayMs = delaySeconds * 1000;
+  
+  // Schedule new organization
+  autoOrganizeTimer = setTimeout(async () => {
+    autoOrganizeTimer = null;
+    
+    // Don't auto-organize if already organizing
+    if (isOrganizing) {
+      return;
+    }
+    
+    try {
+      // Get the current window
+      const window = await chrome.windows.getCurrent();
+      if (!window?.id) return;
+      
+      // Run organize without feedback (silent mode)
+      await runOrganizeWithFeedback(window.id, { includeLabelGroups: true });
+    } catch (error) {
+      console.error('Auto-organize error:', error);
+    }
+  }, delayMs);
+}
+
 // Update badge when tabs are created, updated, or removed.
-chrome.tabs.onCreated.addListener(scheduleBadgeUpdate);
+chrome.tabs.onCreated.addListener((tab) => {
+  scheduleBadgeUpdate();
+  scheduleAutoOrganize();
+});
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   scheduleBadgeUpdate();

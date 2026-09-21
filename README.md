@@ -17,6 +17,7 @@ A Chrome extension that **deduplicates tabs**, **tidies pinned tab lists**, main
 ## Key features
 
 - **AI tab organization**: Group tabs with OpenAI, Anthropic, Google, Chrome built-in AI, or a loopback model server. Cloud providers use your API key. Provider fallback is opt-in.
+- **Auto-organize** (optional): Automatically organize tabs with AI when new tabs are opened. Smart debouncing prevents excessive AI calls during rapid tab creation. Configurable delay (1-60 seconds, default 5) before organization triggers. Disabled by default.
 - **Duplicate detection**: Same base URL with different anchors/hashes; optional ignore-query / ignore-hash rules; case-insensitive matching.
 - **BOOKMARKS and pinned URLs**: Pin, unpin, and order tabs from a list. Choose the BOOKMARKS group colour; the default is yellow.
 - **PRs** (optional): Maintain a group for open pull requests and review requests, and choose its colour. The default is blue. Stale PR tabs leave the group but remain open.

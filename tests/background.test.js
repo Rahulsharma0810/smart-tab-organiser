@@ -1061,3 +1061,79 @@ test('partial GitHub errors preserve failed tabs from AI and managed groups from
   assert.equal(removedFromManagedGroup, true);
   assert.equal(navigatedTab.groupId, -1);
 });
+
+test('auto-organize is disabled until the user enables it', async () => {
+  const { chrome, context } = loadBackground();
+  const calls = [];
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: false });
+  context.runOrganizeWithFeedback = async (windowId, options) => calls.push({ windowId, options });
+  
+  await context.scheduleAutoOrganize();
+  // Wait slightly longer than default delay
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  assert.equal(calls.length, 0, 'Auto-organize should not trigger when disabled');
+});
+
+test('auto-organize skips when no organizable tabs exist', async () => {
+  const { chrome, context } = loadBackground();
+  const calls = [];
+  chrome.storage.local.get = async () => ({ 
+    autoOrganizeEnabled: true,
+    autoOrganizeDelay: 0.05 // 50ms for faster test
+  });
+  chrome.windows.getCurrent = async () => ({ id: 1 });
+  context.getOrganizableTabs = async () => []; // No organizable tabs
+  context.runOrganizeWithFeedback = async (windowId, options) => calls.push({ windowId, options });
+  
+  await context.scheduleAutoOrganize();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  assert.equal(calls.length, 0, 'Auto-organize should skip when no organizable tabs');
+});
+
+test('auto-organize triggers after delay when tabs exist', async () => {
+  const { chrome, context } = loadBackground();
+  const calls = [];
+  chrome.storage.local.get = async () => ({ 
+    autoOrganizeEnabled: true,
+    autoOrganizeDelay: 0.05 // 50ms for faster test
+  });
+  chrome.windows.getCurrent = async () => ({ id: 1 });
+  context.getOrganizableTabs = async () => [{ id: 1, url: 'https://example.com' }];
+  context.runOrganizeWithFeedback = async (windowId, options) => calls.push({ windowId, options });
+  
+  await context.scheduleAutoOrganize();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  assert.equal(calls.length, 1, 'Auto-organize should trigger once');
+  assert.equal(calls[0].windowId, 1);
+  assert.equal(calls[0].options.includeLabelGroups, true);
+});
+
+test('auto-organize debouncing resets timer on new tab creation', async () => {
+  const { chrome, context } = loadBackground();
+  const calls = [];
+  chrome.storage.local.get = async () => ({ 
+    autoOrganizeEnabled: true,
+    autoOrganizeDelay: 0.1 // 100ms
+  });
+  chrome.windows.getCurrent = async () => ({ id: 1 });
+  context.getOrganizableTabs = async () => [{ id: 1, url: 'https://example.com' }];
+  context.runOrganizeWithFeedback = async (windowId, options) => calls.push({ windowId, options });
+  
+  // First tab creation
+  await context.scheduleAutoOrganize();
+  await new Promise(resolve => setTimeout(resolve, 60)); // Wait 60ms
+  
+  // Second tab creation before first timer fires
+  await context.scheduleAutoOrganize();
+  await new Promise(resolve => setTimeout(resolve, 60)); // Wait another 60ms
+  
+  assert.equal(calls.length, 0, 'Should not have triggered yet due to debouncing');
+  
+  // Wait for the debounced timer to complete
+  await new Promise(resolve => setTimeout(resolve, 60));
+  
+  assert.equal(calls.length, 1, 'Should trigger once after debouncing settles');
+});

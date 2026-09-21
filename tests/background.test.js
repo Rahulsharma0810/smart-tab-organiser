@@ -310,6 +310,78 @@ test('custom OpenAI chain status reports missing model separately from missing k
   assert.equal(customEntry.status, 'missing-model-name');
 });
 
+test('custom OpenAI chain marks missing host permission as not ready', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => false;
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'openai',
+    openaiKey: 'openai-key',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['custom-openai', 'claude'],
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'test-model',
+    claudeKey: 'claude-key',
+  });
+
+  const customEntry = description.entries.find((entry) => entry.provider === 'custom-openai');
+  assert.equal(customEntry.status, 'missing-host-permission');
+  assert.deepEqual(Array.from(description.chain), ['openai', 'claude']);
+});
+
+test('organizeTabs requests custom host permission before any grouping mutation', async () => {
+  const { chrome, context } = loadBackground();
+  const tabs = [
+    { id: 1, index: 0, pinned: false, groupId: -1, windowId: 1, title: 'One', url: 'https://example.com/one' },
+    { id: 2, index: 1, pinned: false, groupId: -1, windowId: 1, title: 'Two', url: 'https://example.com/two' },
+  ];
+  const callOrder = [];
+
+  chrome.storage.local.get = async () => ({
+    aiProvider: 'custom-openai',
+    aiFallbackEnabled: false,
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'model-a',
+    customOpenaiKey: 'key',
+  });
+  chrome.permissions.contains = async () => {
+    callOrder.push('contains');
+    return false;
+  };
+  chrome.permissions.request = async () => {
+    callOrder.push('request');
+    return false;
+  };
+  chrome.tabs.query = async (queryInfo = {}) => {
+    if (Object.prototype.hasOwnProperty.call(queryInfo, 'groupId')) return [];
+    return tabs.map((tab) => ({ ...tab }));
+  };
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.ungroup = async () => {
+    callOrder.push('ungroup');
+  };
+  context.fetch = async () => {
+    throw new Error('fetch should not run when permission is denied');
+  };
+
+  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+  assert.equal(result.success, false);
+  assert.match(result.error, /OpenAI Compatible API Host is not configured\./);
+  assert.match(result.error, /Fetch models/);
+  assert.equal(callOrder.includes('ungroup'), false);
+  assert.equal(callOrder.includes('request'), true);
+  assert.equal(callOrder.at(-1), 'contains');
+});
+
+test('custom OpenAI base URL keeps query values with trailing slashes', () => {
+  const { context } = loadBackground();
+
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://api.example.com/v1?sig=abc/'),
+    'https://api.example.com/v1?sig=abc/'
+  );
+});
+
 test('local model responses stream before they are parsed', async () => {
   const { context } = loadBackground();
   const encoder = new TextEncoder();

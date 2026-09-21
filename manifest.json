@@ -9,8 +9,7 @@
     "storage",
     "tabGroups",
     "notifications",
-    "contextMenus",
-    "permissions"
+    "contextMenus"
   ],
   "host_permissions": [
     "https://api.openai.com/*",

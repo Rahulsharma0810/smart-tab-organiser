@@ -415,9 +415,25 @@ function providerLabel(provider) {
   return PROVIDER_LABELS[provider] || provider;
 }
 
+function normalizeHostname(hostname) {
+  const value = String(hostname || '').trim().toLowerCase();
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
 function isLoopbackHostname(hostname) {
-  const value = String(hostname || '').toLowerCase();
-  return value === 'localhost' || value === '127.0.0.1' || value === '::1' || value === '[::1]';
+  const value = normalizeHostname(hostname);
+  return value === 'localhost' || value === '127.0.0.1' || value === '::1';
+}
+
+function isStaticallyAllowedLoopbackHost(urlObj) {
+  if (!isLoopbackHostname(urlObj?.hostname)) return false;
+  const protocol = String(urlObj?.protocol || '').toLowerCase();
+  if (protocol !== 'http:') return false;
+  const host = String(urlObj?.hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1';
 }
 
 function customOpenAIOriginPattern(urlObj) {
@@ -425,8 +441,17 @@ function customOpenAIOriginPattern(urlObj) {
 }
 
 async function ensureCustomOpenAIHostPermission(baseUrl, requestPermission = false) {
-  const urlObj = new URL(baseUrl);
-  if (isLoopbackHostname(urlObj.hostname)) {
+  let urlObj;
+  try {
+    urlObj = new URL(baseUrl);
+  } catch {
+    throw new AiProviderError({
+      provider: 'custom-openai',
+      message: 'Enter a valid OpenAI-compatible base URL.'
+    });
+  }
+
+  if (isStaticallyAllowedLoopbackHost(urlObj)) {
     return;
   }
 
@@ -454,6 +479,40 @@ async function ensureCustomOpenAIHostPermission(baseUrl, requestPermission = fal
   if (!granted) {
     throw new Error(`Permission for ${originPattern} was not granted.`);
   }
+}
+
+async function customOpenAIHostAccessStatus(rawBaseUrl) {
+  const baseRaw = (rawBaseUrl || '').trim();
+  if (!baseRaw) return { status: 'missing-base-url' };
+
+  let baseUrl;
+  try {
+    baseUrl = normalizeCustomOpenAIBaseUrl(baseRaw);
+  } catch {
+    return { status: 'invalid-base-url' };
+  }
+
+  let urlObj;
+  try {
+    urlObj = new URL(baseUrl);
+  } catch {
+    return { status: 'invalid-base-url' };
+  }
+
+  if (isStaticallyAllowedLoopbackHost(urlObj)) {
+    return { status: 'ready', baseUrl };
+  }
+
+  if (urlObj.protocol !== 'https:') {
+    return { status: 'insecure-http-url', baseUrl };
+  }
+
+  const originPattern = customOpenAIOriginPattern(urlObj);
+  const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+  if (!hasPermission) {
+    return { status: 'missing-host-permission', baseUrl, originPattern };
+  }
+  return { status: 'ready', baseUrl, originPattern };
 }
 
 class AiProviderError extends Error {
@@ -3037,7 +3096,7 @@ function normalizeCustomOpenAIBaseUrl(rawUrl) {
     parsed.pathname = parsed.pathname.replace(/\/+$/, '');
   }
 
-  return parsed.toString().replace(/\/+$/, '');
+  return parsed.toString();
 }
 
 function buildCustomOpenAIEndpoint(baseUrl, endpointPath) {
@@ -3412,24 +3471,31 @@ function providerHasKey(provider, settings) {
   return false;
 }
 
-/** True if the provider has everything it needs from settings to be worth attempting. */
-function providerIsConfigured(provider, settings) {
-  if (provider === 'chrome-ai') return true; // no key or name; availability is checked at call time
-  if (provider === 'local') return !!settings.localModel?.trim();
-  if (provider === 'custom-openai') return !!(settings.customOpenaiBaseUrl?.trim() && settings.customOpenaiModel?.trim());
-  return providerHasKey(provider, settings);
-}
-
-function providerConfigurationStatus(provider, settings) {
+async function providerConfigurationStatus(provider, settings) {
   if (provider === 'custom-openai') {
     if (!settings.customOpenaiBaseUrl?.trim()) return 'missing-base-url';
     if (!settings.customOpenaiModel?.trim()) return 'missing-model-name';
-    return 'ready';
+    const hostStatus = await customOpenAIHostAccessStatus(settings.customOpenaiBaseUrl);
+    return hostStatus.status;
   }
   if (provider === 'local') {
     return settings.localModel?.trim() ? 'ready' : 'no-model-name';
   }
   return providerHasKey(provider, settings) ? 'ready' : 'no-key';
+}
+
+function providerStatusFixMessage(provider, status) {
+  if (provider === 'custom-openai') {
+    if (status === 'missing-base-url') return 'Set the OpenAI Compatible base URL in Smart Tab Organiser settings.';
+    if (status === 'missing-model-name') return 'Set the OpenAI Compatible model name in Smart Tab Organiser settings.';
+    if (status === 'invalid-base-url') return 'Enter a valid OpenAI Compatible base URL in Smart Tab Organiser settings.';
+    if (status === 'insecure-http-url') return 'Use HTTPS for remote OpenAI Compatible hosts. HTTP is allowed only for localhost or 127.0.0.1.';
+    if (status === 'missing-host-permission') return 'Open Options and click "Fetch models" for this host to grant access.';
+  }
+  if (provider === 'local') {
+    return 'Set a model name in Smart Tab Organiser settings (for example, "llama3.1:8b").';
+  }
+  return 'Add an API key in Smart Tab Organiser settings, or configure another provider as fallback.';
 }
 
 // The user's preferred fallback order (Options → Fallback order). Unknown entries are
@@ -3465,7 +3531,9 @@ function normalizeFallbackOrder(saved) {
  *   Within the eligible set, the user's order wins.
  *
  * Statuses: 'primary' | 'ready' (in the chain) | 'disabled' | 'no-key' |
- * 'not-downloaded' | 'no-model-name' | 'cloud-opt-in-off' | 'not-after-cloud'.
+ * 'not-downloaded' | 'no-model-name' | 'cloud-opt-in-off' | 'not-after-cloud' |
+ * 'missing-base-url' | 'missing-model-name' | 'invalid-base-url' |
+ * 'insecure-http-url' | 'missing-host-permission'.
  * The options page renders these directly, so the UI can never drift from this logic.
  */
 async function describeProviderChain(settings) {
@@ -3482,27 +3550,52 @@ async function describeProviderChain(settings) {
   }
 
   const chain = [primary];
-  const entries = order.map((p) => {
-    if (p === primary) return { provider: p, status: 'primary' };
-    if (!fallbackEnabled) return { provider: p, status: 'disabled' };
+  const entries = [];
+  for (const p of order) {
+    if (p === primary) {
+      entries.push({ provider: p, status: 'primary' });
+      continue;
+    }
+    if (!fallbackEnabled) {
+      entries.push({ provider: p, status: 'disabled' });
+      continue;
+    }
     if (localPrimary) {
       if (p === 'local') {
-        if (!settings.localModel?.trim()) return { provider: p, status: 'no-model-name' };
+        if (!settings.localModel?.trim()) {
+          entries.push({ provider: p, status: 'no-model-name' });
+          continue;
+        }
       } else if (p === 'chrome-ai') {
-        if (!chromeAiReady) return { provider: p, status: 'not-downloaded' };
+        if (!chromeAiReady) {
+          entries.push({ provider: p, status: 'not-downloaded' });
+          continue;
+        }
       } else {
-        if (settings.aiAllowCloudFallback !== true) return { provider: p, status: 'cloud-opt-in-off' };
-        const configStatus = providerConfigurationStatus(p, settings);
-        if (configStatus !== 'ready') return { provider: p, status: configStatus };
+        if (settings.aiAllowCloudFallback !== true) {
+          entries.push({ provider: p, status: 'cloud-opt-in-off' });
+          continue;
+        }
+        const configStatus = await providerConfigurationStatus(p, settings);
+        if (configStatus !== 'ready') {
+          entries.push({ provider: p, status: configStatus });
+          continue;
+        }
       }
     } else {
-      if (isLocalProvider(p)) return { provider: p, status: 'not-after-cloud' };
-      const configStatus = providerConfigurationStatus(p, settings);
-      if (configStatus !== 'ready') return { provider: p, status: configStatus };
+      if (isLocalProvider(p)) {
+        entries.push({ provider: p, status: 'not-after-cloud' });
+        continue;
+      }
+      const configStatus = await providerConfigurationStatus(p, settings);
+      if (configStatus !== 'ready') {
+        entries.push({ provider: p, status: configStatus });
+        continue;
+      }
     }
     chain.push(p);
-    return { provider: p, status: 'ready' };
-  });
+    entries.push({ provider: p, status: 'ready' });
+  }
 
   return { primary, order, chain, entries, fallbackEnabled, localPrimary };
 }
@@ -3510,6 +3603,15 @@ async function describeProviderChain(settings) {
 /** Ordered list of providers to attempt: primary first, then eligible fallbacks in the user's order. */
 async function buildProviderChain(settings) {
   return (await describeProviderChain(settings)).chain;
+}
+
+async function computeProviderStatuses(providerChain, settings) {
+  return Promise.all(
+    providerChain.map(async (provider) => ({
+      provider,
+      status: await providerConfigurationStatus(provider, settings),
+    }))
+  );
 }
 
 async function organizeTabs(
@@ -3546,13 +3648,28 @@ async function organizeTabs(
 
     // Validate that at least one provider in the chain is configured.
     // Local providers need no provider key: Chrome AI needs nothing; loopback needs a model name.
+    // This preflight runs before any tab-group mutation.
     const providerChain = await buildProviderChain(settings);
-    const usableChain = providerChain.filter((p) => providerIsConfigured(p, settings));
+    let providerStatuses = await computeProviderStatuses(providerChain, settings);
+    const primary = providerChain[0] || 'openai';
+    const primaryStatus = providerStatuses.find((entry) => entry.provider === primary)?.status || 'no-key';
+
+    if (primary === 'custom-openai' && primaryStatus === 'missing-host-permission') {
+      const baseUrl = normalizeCustomOpenAIBaseUrl(settings.customOpenaiBaseUrl || '');
+      try {
+        await ensureCustomOpenAIHostPermission(baseUrl, true);
+      } catch (_) {
+        // Keep status from a fresh check below so the error remains specific.
+      }
+      providerStatuses = await computeProviderStatuses(providerChain, settings);
+    }
+
+    const usableChain = providerStatuses
+      .filter((entry) => entry.status === 'ready')
+      .map((entry) => entry.provider);
     if (usableChain.length === 0) {
-      const primary = providerChain[0] || 'openai';
-      const fix = primary === 'local'
-        ? 'Set a model name in Smart Tab Organiser settings (e.g. "llama3.1:8b").'
-        : 'Add a key in Smart Tab Organiser settings, or configure another provider as fallback.';
+      const currentPrimaryStatus = providerStatuses.find((entry) => entry.provider === primary)?.status || 'no-key';
+      const fix = providerStatusFixMessage(primary, currentPrimaryStatus);
       return {
         success: false,
         error: `${providerLabel(primary)} is not configured. ${fix}`,

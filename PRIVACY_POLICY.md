@@ -165,7 +165,6 @@ The extension package contains all executable code. It does not download or exec
 | `contextMenus` | Add tab-management commands to the extension action menu. |
 | AI API hosts | Send user-started requests to the selected cloud AI provider. |
 | Optional host permissions (`https://*/*`, `http://*/*`) | Allow runtime, origin-scoped access for a configured custom OpenAI-compatible host after a user gesture. Remote custom HTTP hosts are blocked; loopback HTTP is allowed. |
-| `permissions` | Check and request optional host access for a configured custom OpenAI-compatible host. |
 | `api.github.com` | Run optional GitHub PR, Closed, and issue-label group features. |
 | `localhost` and `127.0.0.1` | Contact an optional model server on the same computer. |
 

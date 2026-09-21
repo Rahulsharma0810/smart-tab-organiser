@@ -669,9 +669,17 @@ footer {
   margin-bottom: 15px;
 }
 
+.provider-grid--compact {
+  grid-template-columns: 1fr;
+}
+
 @media (min-width: 1000px) {
   .provider-grid {
     grid-template-columns: repeat(4, 1fr);
+  }
+
+  .provider-grid--compact {
+    grid-template-columns: minmax(280px, 1fr);
   }
 
   .provider-grid--two {

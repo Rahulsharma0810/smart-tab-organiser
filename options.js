@@ -41,6 +41,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const cloudFallbackRow = document.getElementById('cloudFallbackRow');
   const fallbackOrderItem = document.getElementById('fallbackOrderItem');
   const fallbackOrderList = document.getElementById('fallbackOrderList');
+  const cloudProviderGrid = document.getElementById('cloudProviderGrid');
   const providerCards = document.querySelectorAll('.provider-card[data-provider]');
 
   function updateModelRecommendedHint(provider, hintEl, selectEl) {
@@ -448,14 +449,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function isLoopbackHostnameOptions(hostname) {
-    const value = String(hostname || '').toLowerCase();
-    return value === 'localhost' || value === '127.0.0.1' || value === '::1' || value === '[::1]';
+    const value = String(hostname || '').trim().toLowerCase();
+    const normalized = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
+    return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+  }
+
+  function isStaticallyAllowedLoopbackUrlOptions(parsed) {
+    if (!isLoopbackHostnameOptions(parsed?.hostname)) return false;
+    if ((parsed?.protocol || '').toLowerCase() !== 'http:') return false;
+    const host = String(parsed?.hostname || '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1';
   }
 
   async function requestCustomHostPermissionIfNeeded(rawBaseUrl) {
     const parsed = normalizeCustomBaseUrlForPermission(rawBaseUrl);
     if (!parsed) throw new Error('Enter a valid OpenAI-compatible base URL.');
-    if (isLoopbackHostnameOptions(parsed.hostname)) return;
+    if (isStaticallyAllowedLoopbackUrlOptions(parsed)) return;
     if (parsed.protocol !== 'https:') {
       throw new Error('Remote OpenAI-compatible hosts must use HTTPS. Use HTTPS, or keep HTTP only for localhost/127.0.0.1.');
     }
@@ -477,6 +486,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     'no-key': 'No API key',
     'missing-base-url': 'No base URL',
     'missing-model-name': 'No model name',
+    'invalid-base-url': 'Invalid base URL',
+    'insecure-http-url': 'Remote HTTP blocked',
+    'missing-host-permission': 'Needs host permission',
     'not-downloaded': 'Model not downloaded',
     'no-model-name': 'No model name',
     'cloud-opt-in-off': 'Needs cloud fallback opt-in',
@@ -487,14 +499,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   function updateActiveProviderCard() {
     const primary = aiProviderSelect.value || 'openai';
     const isCloudPrimary = !LOCAL_PROVIDERS_OPTIONS.includes(primary);
+    const fallbackOn = aiFallbackEnabledCheckbox.checked;
     providerCards.forEach((card) => {
       const isSelected = card.dataset.provider === primary;
       card.classList.toggle('provider-card--active', isSelected);
-      // Local provider cards always stay visible. Cloud cards show only the selected
-      // provider, except when the primary is local and cloud fallback needs keys.
+      // Local provider cards always stay visible. Cloud cards stay visible whenever
+      // fallback is enabled so users can configure eligible cloud fallbacks.
       const isCloud = !card.closest('.provider-grid--two');
-      card.hidden = isCloud && isCloudPrimary && !isSelected;
+      const hideCloudCard = isCloud && isCloudPrimary && !fallbackOn && !isSelected;
+      card.hidden = hideCloudCard;
     });
+
+    const visibleCloudCards = Array.from(providerCards)
+      .filter((card) => !card.closest('.provider-grid--two') && !card.hidden)
+      .length;
+    if (cloudProviderGrid) {
+      cloudProviderGrid.classList.toggle('provider-grid--compact', visibleCloudCards <= 1);
+    }
   }
 
   // The cloud opt-in only applies to a local primary, and the order list
@@ -585,7 +606,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (aiAllowCloudFallbackCheckbox.checked) {
         parts.push(desc.chain.some((p) => !LOCAL_PROVIDERS_OPTIONS.includes(p))
           ? 'If a cloud fallback runs, tab titles and URLs are sent to that provider.'
-          : 'Cloud fallback is allowed, but no cloud provider has an API key yet.');
+          : 'Cloud fallback is allowed, but no cloud provider is fully configured yet.');
       } else {
         parts.push('Cloud providers will never be used.');
       }
@@ -597,6 +618,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         parts.push('Set the OpenAI Compatible base URL to make it eligible for fallback.');
       } else if (customStatus === 'missing-model-name') {
         parts.push('Set the OpenAI Compatible model name to make it eligible for fallback.');
+      } else if (customStatus === 'invalid-base-url') {
+        parts.push('Fix the OpenAI Compatible base URL so the extension can use it.');
+      } else if (customStatus === 'insecure-http-url') {
+        parts.push('Remote OpenAI Compatible hosts must use HTTPS. HTTP is allowed only for localhost or 127.0.0.1.');
+      } else if (customStatus === 'missing-host-permission') {
+        parts.push('OpenAI Compatible host access is not granted yet. Click Fetch models for that host first.');
       } else {
         parts.push('Add an OpenAI, Claude, or Gemini API key above to enable automatic fallback.');
       }

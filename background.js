@@ -994,6 +994,13 @@ async function scheduleAutoOrganize() {
       const window = await chrome.windows.getCurrent();
       if (!window?.id) return;
       
+      // Check if there are organizable tabs (HTTP/HTTPS only)
+      const organizableTabs = await getOrganizableTabs(window.id);
+      if (organizableTabs.length === 0) {
+        console.log('Auto-organize: No organizable tabs found, skipping');
+        return;
+      }
+      
       // Run organize without feedback (silent mode)
       await runOrganizeWithFeedback(window.id, { includeLabelGroups: true });
     } catch (error) {

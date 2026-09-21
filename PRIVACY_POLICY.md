@@ -1,6 +1,6 @@
 # Privacy Policy for Smart Tab Organiser
 
-**Last updated:** August 20, 2026
+**Last updated:** September 21, 2026
 
 ## Overview
 
@@ -73,6 +73,18 @@ The selected provider processes the request under its own terms and privacy poli
 
 The user's provider account controls API costs and provider-side retention. The extension developer does not receive these requests or responses.
 
+### Custom OpenAI-compatible hosts
+
+The OpenAI Compatible API Host option is optional. The user must provide a base URL and model name before the extension will use it.
+
+API key use depends on the selected host. Some hosts require a key, and some self-hosted setups do not.
+
+The extension requests host permission for a custom host only when the user tests that host or starts organization with it. The request is scoped to the configured host origin.
+
+For remote custom hosts, the extension requires HTTPS. The extension blocks remote `http://` custom hosts to avoid sending prompts or credentials without transport encryption.
+
+The extension allows `http://` only for loopback hosts on the same computer (`localhost`, `127.0.0.1`, and `::1`).
+
 ### Provider fallback
 
 All provider fallback is off by default. The user must enable fallback before the extension attempts another provider.
@@ -124,6 +136,7 @@ GitHub processes requests under the [GitHub General Privacy Statement](https://d
 The extension shares data only for the user-facing features described in this policy:
 
 - With OpenAI, Anthropic, or Google when the user starts cloud AI organization, including an enabled fallback
+- With a configured custom OpenAI-compatible host when the user tests that host or starts AI organization with it
 - With GitHub when the user enables or starts a GitHub group feature
 - With a loopback model server when the user selects the local-model provider
 
@@ -137,7 +150,7 @@ Chrome removes extension-local storage when the user uninstalls the extension. A
 
 ## Security
 
-Cloud AI and GitHub requests use HTTPS. Local-model requests are restricted to loopback addresses on the same computer. The loopback server controls any later connection.
+Cloud AI and GitHub requests use HTTPS. Custom OpenAI-compatible hosts require HTTPS unless they are loopback hosts on the same computer. Local-model requests are restricted to loopback addresses on the same computer. The loopback server controls any later connection.
 
 The extension package contains all executable code. It does not download or execute remote JavaScript or WebAssembly.
 
@@ -151,6 +164,8 @@ The extension package contains all executable code. It does not download or exec
 | `notifications` | Show progress, results, and errors for user-started operations. |
 | `contextMenus` | Add tab-management commands to the extension action menu. |
 | AI API hosts | Send user-started requests to the selected cloud AI provider. |
+| Optional host permissions (`https://*/*`, `http://*/*`) | Allow runtime, origin-scoped access for a configured custom OpenAI-compatible host after a user gesture. Remote custom HTTP hosts are blocked; loopback HTTP is allowed. |
+| `permissions` | Check and request optional host access for a configured custom OpenAI-compatible host. |
 | `api.github.com` | Run optional GitHub PR, Closed, and issue-label group features. |
 | `localhost` and `127.0.0.1` | Contact an optional model server on the same computer. |
 

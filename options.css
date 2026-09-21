@@ -691,6 +691,10 @@ footer {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
+.provider-card[hidden] {
+  display: none;
+}
+
 .provider-card--active {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-focus);

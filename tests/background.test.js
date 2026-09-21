@@ -60,6 +60,10 @@ function loadBackground() {
       clear: async () => {},
       create: async () => {},
     },
+    permissions: {
+      contains: async () => true,
+      request: async () => true,
+    },
     runtime: {
       getURL: (relativePath) => `chrome-extension://test/${relativePath}`,
       onInstalled: eventStub(),
@@ -251,6 +255,59 @@ test('provider fallback is disabled until the user enables it', async () => {
 
   assert.equal(description.fallbackEnabled, false);
   assert.deepEqual(Array.from(description.chain), ['openai']);
+});
+
+test('custom OpenAI host normalization preserves explicit paths and defaults origin-only input to /v1', () => {
+  const { context } = loadBackground();
+
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('api.example.com'),
+    'https://api.example.com/v1'
+  );
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://gateway.example.com/compat'),
+    'https://gateway.example.com/compat'
+  );
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://gateway.example.com/chat/completions?tenant=abc'),
+    'https://gateway.example.com/?tenant=abc'
+  );
+});
+
+test('custom OpenAI model listing accepts top-level arrays and string entries', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => true;
+
+  context.fetch = async (url) => {
+    assert.equal(url, 'https://api.example.com/v1/models');
+    return {
+      ok: true,
+      json: async () => ([
+        'model-b',
+        { id: 'model-a' },
+        { name: 'model-c' },
+      ]),
+    };
+  };
+
+  const result = await context.listCustomOpenAIModels('https://api.example.com', '');
+  assert.equal(result.baseUrl, 'https://api.example.com/v1');
+  assert.deepEqual(Array.from(result.models), ['model-a', 'model-b', 'model-c']);
+});
+
+test('custom OpenAI chain status reports missing model separately from missing key', async () => {
+  const { context } = loadBackground();
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'openai',
+    openaiKey: 'openai-key',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['custom-openai', 'claude'],
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+  });
+
+  const customEntry = description.entries.find((entry) => entry.provider === 'custom-openai');
+  assert.equal(customEntry.status, 'missing-model-name');
 });
 
 test('local model responses stream before they are parsed', async () => {

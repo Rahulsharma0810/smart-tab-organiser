@@ -432,11 +432,51 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
   const LOCAL_PROVIDERS_OPTIONS = ['chrome-ai', 'local'];
 
+  function normalizeCustomBaseUrlForPermission(rawUrl) {
+    let url = (rawUrl || '').trim();
+    if (!url) return null;
+    if (!/^https?:\/\//i.test(url)) {
+      url = `https://${url}`;
+    }
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return null;
+    }
+    return parsed;
+  }
+
+  function isLoopbackHostnameOptions(hostname) {
+    const value = String(hostname || '').toLowerCase();
+    return value === 'localhost' || value === '127.0.0.1' || value === '::1' || value === '[::1]';
+  }
+
+  async function requestCustomHostPermissionIfNeeded(rawBaseUrl) {
+    const parsed = normalizeCustomBaseUrlForPermission(rawBaseUrl);
+    if (!parsed) throw new Error('Enter a valid OpenAI-compatible base URL.');
+    if (isLoopbackHostnameOptions(parsed.hostname)) return;
+    if (parsed.protocol !== 'https:') {
+      throw new Error('Remote OpenAI-compatible hosts must use HTTPS. Use HTTPS, or keep HTTP only for localhost/127.0.0.1.');
+    }
+
+    const originPattern = `${parsed.protocol}//${parsed.host}/*`;
+    const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+    if (hasPermission) return;
+
+    const granted = await chrome.permissions.request({ origins: [originPattern] });
+    if (!granted) {
+      throw new Error(`Permission for ${originPattern} was not granted.`);
+    }
+  }
+
   // Row tags for each status describeProviderChain can report.
   const ORDER_TAG_TEXT = {
     primary: 'Primary — always first',
     ready: 'Ready',
     'no-key': 'No API key',
+    'missing-base-url': 'No base URL',
+    'missing-model-name': 'No model name',
     'not-downloaded': 'Model not downloaded',
     'no-model-name': 'No model name',
     'cloud-opt-in-off': 'Needs cloud fallback opt-in',
@@ -552,7 +592,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (desc.chain.length > 1) {
       parts.push('Cloud primaries never fall back to local providers.');
     } else {
-      parts.push('Add an OpenAI, Claude, Gemini or OpenAI Compatible key above to enable automatic fallback.');
+      const customStatus = statusByProvider.get('custom-openai');
+      if (customStatus === 'missing-base-url') {
+        parts.push('Set the OpenAI Compatible base URL to make it eligible for fallback.');
+      } else if (customStatus === 'missing-model-name') {
+        parts.push('Set the OpenAI Compatible model name to make it eligible for fallback.');
+      } else {
+        parts.push('Add an OpenAI, Claude, or Gemini API key above to enable automatic fallback.');
+      }
     }
     aiFallbackHintEl.textContent = parts.join(' ');
   }
@@ -668,6 +715,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     customOpenaiStatus.textContent = 'Testing connection...';
     customOpenaiStatus.className = 'status info';
     try {
+      await requestCustomHostPermissionIfNeeded(customOpenaiBaseUrlInput.value.trim());
       const result = await chrome.runtime.sendMessage({
         action: 'testCustomOpenAI',
         baseUrl: customOpenaiBaseUrlInput.value.trim(),
@@ -1096,4 +1144,3 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 });
-

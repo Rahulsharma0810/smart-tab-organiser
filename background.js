@@ -415,6 +415,47 @@ function providerLabel(provider) {
   return PROVIDER_LABELS[provider] || provider;
 }
 
+function isLoopbackHostname(hostname) {
+  const value = String(hostname || '').toLowerCase();
+  return value === 'localhost' || value === '127.0.0.1' || value === '::1' || value === '[::1]';
+}
+
+function customOpenAIOriginPattern(urlObj) {
+  return `${urlObj.protocol}//${urlObj.host}/*`;
+}
+
+async function ensureCustomOpenAIHostPermission(baseUrl, requestPermission = false) {
+  const urlObj = new URL(baseUrl);
+  if (isLoopbackHostname(urlObj.hostname)) {
+    return;
+  }
+
+  if (urlObj.protocol !== 'https:') {
+    throw new AiProviderError({
+      provider: 'custom-openai',
+      message: 'Remote OpenAI-compatible hosts must use HTTPS. Use HTTPS, or keep HTTP only for localhost/127.0.0.1.'
+    });
+  }
+
+  const originPattern = customOpenAIOriginPattern(urlObj);
+  const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+  if (hasPermission) {
+    return;
+  }
+
+  if (!requestPermission) {
+    throw new AiProviderError({
+      provider: 'custom-openai',
+      message: `Host permission missing for ${originPattern}. Open Options and click "Fetch models" for this host to grant access.`
+    });
+  }
+
+  const granted = await chrome.permissions.request({ origins: [originPattern] });
+  if (!granted) {
+    throw new Error(`Permission for ${originPattern} was not granted.`);
+  }
+}
+
 class AiProviderError extends Error {
   constructor({ provider, status, message, rawBody, cause }) {
     super(message || 'AI provider error');
@@ -441,6 +482,17 @@ function extractProviderErrorMessage(body) {
     return JSON.stringify(body);
   } catch (_) {
     return String(body);
+  }
+}
+
+async function readErrorResponseBody(response) {
+  const text = await response.text().catch(() => '');
+  const bodyText = typeof text === 'string' ? text.trim() : '';
+  if (!bodyText) return null;
+  try {
+    return JSON.parse(bodyText);
+  } catch (_) {
+    return bodyText;
   }
 }
 
@@ -2954,7 +3006,8 @@ const CUSTOM_OPENAI_TIMEOUT_MS = 180000;
 
 /**
  * Normalize a user-entered OpenAI-compatible host address into a base URL.
- * Accepts "https://host", "host/v1", "https://host/v1/", with or without scheme or /v1.
+ * Accepts "https://host", "host/v1", "https://host/v1/", and explicit API base paths.
+ * For origin-only input, defaults to "/v1".
  */
 function normalizeCustomOpenAIBaseUrl(rawUrl) {
   let url = (rawUrl || '').trim();
@@ -2962,31 +3015,65 @@ function normalizeCustomOpenAIBaseUrl(rawUrl) {
   if (!/^https?:\/\//i.test(url)) {
     url = `https://${url}`;
   }
-  url = url.replace(/\/+$/, '');
-  // Strip a full endpoint path if the user pasted one, then ensure the /v1 prefix.
-  url = url.replace(/\/chat\/completions$/, '');
-  if (!/\/v\d+$/.test(url)) {
-    url = `${url}/v1`;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('Enter a valid OpenAI-compatible base URL.');
   }
-  return url;
+
+  const pathname = (parsed.pathname || '/').replace(/\/+$/, '');
+  const hasExplicitPath = pathname !== '' && pathname !== '/';
+  const lowerPath = pathname.toLowerCase();
+  const strippedPath = lowerPath.endsWith('/chat/completions')
+    ? pathname.slice(0, -'/chat/completions'.length)
+    : pathname;
+
+  parsed.pathname = hasExplicitPath
+    ? (strippedPath || '/')
+    : '/v1';
+
+  if (parsed.pathname.length > 1) {
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  }
+
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+function buildCustomOpenAIEndpoint(baseUrl, endpointPath) {
+  const parsed = new URL(baseUrl);
+  const basePath = parsed.pathname.replace(/\/+$/, '');
+  parsed.pathname = `${basePath}${endpointPath}`;
+  return parsed.toString();
 }
 
 /** List the models an OpenAI-compatible host currently has available (for the Test connection button). */
-async function listCustomOpenAIModels(rawBaseUrl, apiKey) {
+async function listCustomOpenAIModels(rawBaseUrl, apiKey, options = {}) {
+  const requestPermission = options.requestPermission === true;
   const baseUrl = normalizeCustomOpenAIBaseUrl(rawBaseUrl);
   if (!baseUrl) throw new Error('Enter a base URL for the OpenAI-compatible host first.');
+  await ensureCustomOpenAIHostPermission(baseUrl, requestPermission);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   try {
-    const response = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
+    const response = await fetch(buildCustomOpenAIEndpoint(baseUrl, '/models'), { headers, signal: controller.signal });
     if (!response.ok) {
-      throw new Error(`OpenAI-compatible host returned ${response.status} for ${baseUrl}/models`);
+      const errorBody = await readErrorResponseBody(response);
+      const message = extractProviderErrorMessage(errorBody) || `OpenAI-compatible host returned ${response.status} for ${baseUrl}/models`;
+      throw new AiProviderError({ provider: 'custom-openai', status: response.status, message, rawBody: errorBody });
     }
     const data = await response.json();
-    const models = (data.data || data.models || [])
-      .map(m => m.id || m.name)
+    const catalog = Array.isArray(data)
+      ? data
+      : (Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []));
+    const models = catalog
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object') return entry.id || entry.name || '';
+        return '';
+      })
       .filter(Boolean)
       .sort();
     return { baseUrl, models };
@@ -3005,6 +3092,7 @@ async function callCustomOpenAI(rawBaseUrl, apiKey, model, tabs, customInstructi
   const baseUrl = normalizeCustomOpenAIBaseUrl(rawBaseUrl);
   if (!baseUrl) throw new Error('No OpenAI-compatible base URL configured.');
   if (!model?.trim()) throw new Error('No model name configured for the OpenAI-compatible host.');
+  await ensureCustomOpenAIHostPermission(baseUrl, false);
   const basePrompt = buildOrganizePrompt(tabs, customInstructions, existingGroups, minGroupSize);
   const retryReminder = '\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON array: start with [ and end with ]. No explanation, no markdown code fences.';
 
@@ -3024,7 +3112,7 @@ async function callCustomOpenAI(rawBaseUrl, apiKey, model, tabs, customInstructi
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      const response = await fetch(buildCustomOpenAIEndpoint(baseUrl, '/chat/completions'), {
         method: 'POST',
         headers,
         signal: controller.signal,
@@ -3037,14 +3125,18 @@ async function callCustomOpenAI(rawBaseUrl, apiKey, model, tabs, customInstructi
         })
       });
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
-        console.error('[Smart Tab Organiser] OpenAI-compatible host error:', response.status, error);
-        throw new Error(error.error?.message || error.message || `OpenAI-compatible host returned ${response.status}`);
+        const errorBody = await readErrorResponseBody(response);
+        const message = extractProviderErrorMessage(errorBody) || `OpenAI-compatible host returned ${response.status}`;
+        console.error('[Smart Tab Organiser] OpenAI-compatible host error:', response.status, message, errorBody);
+        throw new AiProviderError({ provider: 'custom-openai', status: response.status, message, rawBody: errorBody });
       }
       content = await readOpenAiCompatibleChatResponse(response);
     } catch (error) {
       if (error.name === 'AbortError') {
-        throw new Error(`OpenAI-compatible host timed out after ${Math.round(CUSTOM_OPENAI_TIMEOUT_MS / 1000)}s.`);
+        throw new AiProviderError({
+          provider: 'custom-openai',
+          message: `OpenAI-compatible host timed out after ${Math.round(CUSTOM_OPENAI_TIMEOUT_MS / 1000)}s.`
+        });
       }
       throw error;
     } finally {
@@ -3052,20 +3144,20 @@ async function callCustomOpenAI(rawBaseUrl, apiKey, model, tabs, customInstructi
     }
 
     if (!content) {
-      lastError = new Error(`No response from OpenAI-compatible host model "${model}"`);
+      lastError = new AiProviderError({ provider: 'custom-openai', message: `No response from OpenAI-compatible host model "${model}"` });
       continue;
     }
 
     const groups = parseAiGroupsResponse(content);
     if (!groups) {
       console.warn('[Smart Tab Organiser] OpenAI-compatible host: invalid format. Content preview:', content.slice(0, 200));
-      lastError = new Error(`Invalid response format from OpenAI-compatible host model "${model}"`);
+      lastError = new AiProviderError({ provider: 'custom-openai', message: `Invalid response format from OpenAI-compatible host model "${model}"` });
       continue;
     }
     return groups;
   }
 
-  throw lastError || new Error('OpenAI-compatible host produced no usable response');
+  throw lastError || new AiProviderError({ provider: 'custom-openai', message: 'OpenAI-compatible host produced no usable response' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3316,10 +3408,7 @@ function providerHasKey(provider, settings) {
   if (provider === 'openai') return !!settings.openaiKey?.trim();
   if (provider === 'claude') return !!settings.claudeKey?.trim();
   if (provider === 'gemini') return !!settings.geminiKey?.trim();
-  if (provider === 'custom-openai') {
-    // The API key is optional; the host is usable once it has a base URL and a model name.
-    return !!(settings.customOpenaiBaseUrl?.trim() && settings.customOpenaiModel?.trim());
-  }
+  if (provider === 'custom-openai') return true; // key is optional
   return false;
 }
 
@@ -3327,8 +3416,20 @@ function providerHasKey(provider, settings) {
 function providerIsConfigured(provider, settings) {
   if (provider === 'chrome-ai') return true; // no key or name; availability is checked at call time
   if (provider === 'local') return !!settings.localModel?.trim();
-  if (provider === 'custom-openai') return !!settings.customOpenaiBaseUrl?.trim();
+  if (provider === 'custom-openai') return !!(settings.customOpenaiBaseUrl?.trim() && settings.customOpenaiModel?.trim());
   return providerHasKey(provider, settings);
+}
+
+function providerConfigurationStatus(provider, settings) {
+  if (provider === 'custom-openai') {
+    if (!settings.customOpenaiBaseUrl?.trim()) return 'missing-base-url';
+    if (!settings.customOpenaiModel?.trim()) return 'missing-model-name';
+    return 'ready';
+  }
+  if (provider === 'local') {
+    return settings.localModel?.trim() ? 'ready' : 'no-model-name';
+  }
+  return providerHasKey(provider, settings) ? 'ready' : 'no-key';
 }
 
 // The user's preferred fallback order (Options → Fallback order). Unknown entries are
@@ -3391,11 +3492,13 @@ async function describeProviderChain(settings) {
         if (!chromeAiReady) return { provider: p, status: 'not-downloaded' };
       } else {
         if (settings.aiAllowCloudFallback !== true) return { provider: p, status: 'cloud-opt-in-off' };
-        if (!providerHasKey(p, settings)) return { provider: p, status: 'no-key' };
+        const configStatus = providerConfigurationStatus(p, settings);
+        if (configStatus !== 'ready') return { provider: p, status: configStatus };
       }
     } else {
       if (isLocalProvider(p)) return { provider: p, status: 'not-after-cloud' };
-      if (!providerHasKey(p, settings)) return { provider: p, status: 'no-key' };
+      const configStatus = providerConfigurationStatus(p, settings);
+      if (configStatus !== 'ready') return { provider: p, status: configStatus };
     }
     chain.push(p);
     return { provider: p, status: 'ready' };
@@ -4025,7 +4128,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request.action === 'testCustomOpenAI') {
-    listCustomOpenAIModels(request.baseUrl, request.apiKey || '')
+    listCustomOpenAIModels(request.baseUrl, request.apiKey || '', { requestPermission: true })
       .then(result => sendResponse({ success: true, ...result }))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;

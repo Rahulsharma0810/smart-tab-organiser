@@ -1,6 +1,6 @@
 # Privacy Policy for Smart Tab Organiser
 
-**Last updated:** September 21, 2026
+**Last updated:** September 29, 2026
 
 ## Overview
 
@@ -83,7 +83,7 @@ The extension requests host permission for a custom host only when the user test
 
 For remote custom hosts, the extension requires HTTPS. The extension blocks remote `http://` custom hosts to avoid sending prompts or credentials without transport encryption.
 
-The extension allows `http://` only for loopback hosts on the same computer (`localhost`, `127.0.0.1`, and `::1`).
+The extension allows `http://` only for the statically permitted loopback hosts on the same computer (`localhost` and `127.0.0.1`).
 
 ### Provider fallback
 
@@ -164,7 +164,7 @@ The extension package contains all executable code. It does not download or exec
 | `notifications` | Show progress, results, and errors for user-started operations. |
 | `contextMenus` | Add tab-management commands to the extension action menu. |
 | AI API hosts | Send user-started requests to the selected cloud AI provider. |
-| Optional host permissions (`https://*/*`, `http://*/*`) | Allow runtime, origin-scoped access for a configured custom OpenAI-compatible host after a user gesture. Remote custom HTTP hosts are blocked; loopback HTTP is allowed. |
+| Optional host permission (`https://*/*`) | Allow runtime, origin-scoped HTTPS access for a configured custom OpenAI-compatible host after a user gesture. Loopback HTTP uses the static `localhost` and `127.0.0.1` permissions above. |
 | `api.github.com` | Run optional GitHub PR, Closed, and issue-label group features. |
 | `localhost` and `127.0.0.1` | Contact an optional model server on the same computer. |
 

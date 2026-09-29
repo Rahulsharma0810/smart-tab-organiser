@@ -626,6 +626,15 @@ function classifyAiError(err) {
       hint: 'Check your internet connection or try a different provider.',
     };
   }
+  if (/timed out|timeout|aborted/.test(lower)) {
+    return {
+      type: 'timeout',
+      provider,
+      summary: `${label} timed out.`,
+      detail: baseMsg,
+      hint: 'Try again, reduce the number of tabs, or use a different provider.',
+    };
+  }
   if (/used all .* tokens on hidden reasoning|reasoning model .* produced no output/.test(lower)) {
     return {
       type: 'reasoningExhausted',
@@ -686,7 +695,13 @@ function buildMultiProviderErrorMessage(failures) {
   if (!failures || failures.length === 0) return 'AI organization failed.';
   if (failures.length === 1) {
     const c = failures[0].classification;
-    return c.hint ? `${c.summary} ${c.hint}` : c.summary;
+    const rawDetail = typeof c.detail === 'string' ? c.detail.trim() : '';
+    const conciseDetail = rawDetail.length > 240 ? `${rawDetail.slice(0, 237)}...` : rawDetail;
+    const detail = c.type === 'unknown' && conciseDetail && conciseDetail !== c.summary
+      ? ` ${conciseDetail}`
+      : '';
+    const hint = c.hint ? ` ${c.hint}` : '';
+    return `${c.summary}${detail}${hint}`;
   }
   const lines = failures.map((f) => `• ${providerLabel(f.provider)}: ${shortFailureLabel(f.classification)}`);
   // For multi-failure notifications, keep it tight: list providers + one shared next step.

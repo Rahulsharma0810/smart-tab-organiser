@@ -263,6 +263,15 @@ test('Chrome built-in AI remains configured without an API key', async () => {
   assert.equal(await context.providerConfigurationStatus('chrome-ai', {}), 'ready');
 });
 
+test('custom OpenAI optional host access is restricted to HTTPS', () => {
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '..', 'manifest.json'),
+    'utf8'
+  ));
+
+  assert.deepEqual(manifest.optional_host_permissions, ['https://*/*']);
+});
+
 test('custom OpenAI host normalization preserves explicit paths and defaults origin-only input to /v1', () => {
   const { context } = loadBackground();
 
@@ -299,6 +308,128 @@ test('custom OpenAI model listing accepts top-level arrays and string entries', 
   const result = await context.listCustomOpenAIModels('https://api.example.com', '');
   assert.equal(result.baseUrl, 'https://api.example.com/v1');
   assert.deepEqual(Array.from(result.models), ['model-a', 'model-b', 'model-c']);
+});
+
+test('custom OpenAI calls support optional authorization and JSON or SSE responses', async () => {
+  const { context } = loadBackground();
+  const tabs = [{ title: 'One', url: 'https://example.com/one' }];
+  const requests = [];
+
+  context.fetch = async (url, init) => {
+    requests.push({ url, init });
+    if (requests.length === 1) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          choices: [{ message: { content: '[{"groupName":"JSON","tabIndices":[1]}]' } }],
+        }),
+      };
+    }
+    return makeSseResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: '[{"groupName":"SSE","tabIndices":[1]}]' } }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ]);
+  };
+
+  const jsonGroups = await context.callCustomOpenAI(
+    'https://api.example.com/v1',
+    '',
+    'model-a',
+    tabs,
+    '',
+    null,
+    1
+  );
+  const sseGroups = await context.callCustomOpenAI(
+    'https://api.example.com/v1',
+    'custom-key',
+    'model-a',
+    tabs,
+    '',
+    null,
+    1
+  );
+
+  assert.equal(requests[0].url, 'https://api.example.com/v1/chat/completions');
+  assert.equal(requests[0].init.headers.Authorization, undefined);
+  assert.equal(JSON.parse(requests[0].init.body).stream, true);
+  assert.equal(jsonGroups[0].groupName, 'JSON');
+  assert.equal(requests[1].init.headers.Authorization, 'Bearer custom-key');
+  assert.equal(sseGroups[0].groupName, 'SSE');
+});
+
+test('custom OpenAI HTTP errors retain status and actionable provider detail', async () => {
+  const { context } = loadBackground();
+  context.fetch = async () => ({
+    ok: false,
+    status: 422,
+    text: async () => JSON.stringify({ error: { message: 'unsupported max_tokens' } }),
+  });
+
+  let thrownError = null;
+  await assert.rejects(
+    context.callCustomOpenAI(
+      'https://api.example.com/v1',
+      'custom-key',
+      'model-a',
+      [{ title: 'One', url: 'https://example.com/one' }],
+      '',
+      null,
+      1
+    ),
+    (error) => {
+      thrownError = error;
+      return error.status === 422 && error.message === 'unsupported max_tokens';
+    }
+  );
+
+  const classification = context.classifyAiError(thrownError);
+  const message = context.buildMultiProviderErrorMessage([
+    { provider: 'custom-openai', classification },
+  ]);
+  assert.equal(classification.type, 'unknown');
+  assert.match(message, /HTTP 422/);
+  assert.match(message, /unsupported max_tokens/);
+});
+
+test('custom OpenAI retries share one total timeout', async () => {
+  const { context } = loadBackground();
+  const clockValues = [0, 0, 180001];
+  let fetchCount = 0;
+  context.Date = { now: () => clockValues.shift() ?? 180001 };
+  context.fetch = async () => {
+    fetchCount++;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ choices: [{ message: { content: 'not valid grouping JSON' } }] }),
+    };
+  };
+
+  let thrownError = null;
+  await assert.rejects(
+    context.callProvider(
+      'custom-openai',
+      {
+        customOpenaiBaseUrl: 'https://api.example.com/v1',
+        customOpenaiModel: 'model-a',
+      },
+      [{ title: 'One', url: 'https://example.com/one' }],
+      '',
+      null,
+      1
+    ),
+    (error) => {
+      thrownError = error;
+      return /timed out after 180s/.test(error.message);
+    }
+  );
+
+  assert.equal(fetchCount, 1);
+  assert.equal(context.classifyAiError(thrownError).type, 'timeout');
 });
 
 test('custom OpenAI chain status reports missing model separately from missing key', async () => {

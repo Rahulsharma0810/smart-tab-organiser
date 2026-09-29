@@ -410,19 +410,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   openaiKeyInput.addEventListener('input', () => {
     chrome.storage.local.set({ openaiKey: openaiKeyInput.value.trim() });
   });
-  
+
   claudeKeyInput.addEventListener('input', () => {
     chrome.storage.local.set({ claudeKey: claudeKeyInput.value.trim() });
   });
-  
+
   geminiKeyInput.addEventListener('input', () => {
     chrome.storage.local.set({ geminiKey: geminiKeyInput.value.trim() });
   });
-  
+
   customOpenaiKeyInput.addEventListener('input', () => {
     chrome.storage.local.set({ customOpenaiKey: customOpenaiKeyInput.value.trim() });
   });
-  
+
   const PROVIDER_LABELS_OPTIONS = {
     openai: 'OpenAI',
     claude: 'Claude',
@@ -667,8 +667,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   aiFallbackEnabledCheckbox.addEventListener('change', async () => {
     await chrome.storage.local.set({ aiFallbackEnabled: aiFallbackEnabledCheckbox.checked });
-    updateFallbackControlsVisibility();
-    scheduleFallbackUiRefresh();
+    refreshProviderUi();
   });
 
   aiAllowCloudFallbackCheckbox.addEventListener('change', async () => {
@@ -784,6 +783,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       customOpenaiStatus.className = 'status error';
     } finally {
       testCustomOpenaiBtn.disabled = false;
+      scheduleFallbackUiRefresh();
     }
   });
 

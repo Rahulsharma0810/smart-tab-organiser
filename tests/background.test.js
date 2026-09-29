@@ -60,6 +60,10 @@ function loadBackground() {
       clear: async () => {},
       create: async () => {},
     },
+    permissions: {
+      contains: async () => true,
+      request: async () => true,
+    },
     runtime: {
       getURL: (relativePath) => `chrome-extension://test/${relativePath}`,
       onInstalled: eventStub(),
@@ -251,6 +255,131 @@ test('provider fallback is disabled until the user enables it', async () => {
 
   assert.equal(description.fallbackEnabled, false);
   assert.deepEqual(Array.from(description.chain), ['openai']);
+});
+
+test('custom OpenAI host normalization preserves explicit paths and defaults origin-only input to /v1', () => {
+  const { context } = loadBackground();
+
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('api.example.com'),
+    'https://api.example.com/v1'
+  );
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://gateway.example.com/compat'),
+    'https://gateway.example.com/compat'
+  );
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://gateway.example.com/chat/completions?tenant=abc'),
+    'https://gateway.example.com/?tenant=abc'
+  );
+});
+
+test('custom OpenAI model listing accepts top-level arrays and string entries', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => true;
+
+  context.fetch = async (url) => {
+    assert.equal(url, 'https://api.example.com/v1/models');
+    return {
+      ok: true,
+      json: async () => ([
+        'model-b',
+        { id: 'model-a' },
+        { name: 'model-c' },
+      ]),
+    };
+  };
+
+  const result = await context.listCustomOpenAIModels('https://api.example.com', '');
+  assert.equal(result.baseUrl, 'https://api.example.com/v1');
+  assert.deepEqual(Array.from(result.models), ['model-a', 'model-b', 'model-c']);
+});
+
+test('custom OpenAI chain status reports missing model separately from missing key', async () => {
+  const { context } = loadBackground();
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'openai',
+    openaiKey: 'openai-key',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['custom-openai', 'claude'],
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+  });
+
+  const customEntry = description.entries.find((entry) => entry.provider === 'custom-openai');
+  assert.equal(customEntry.status, 'missing-model-name');
+});
+
+test('custom OpenAI chain marks missing host permission as not ready', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => false;
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'openai',
+    openaiKey: 'openai-key',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['custom-openai', 'claude'],
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'test-model',
+    claudeKey: 'claude-key',
+  });
+
+  const customEntry = description.entries.find((entry) => entry.provider === 'custom-openai');
+  assert.equal(customEntry.status, 'missing-host-permission');
+  assert.deepEqual(Array.from(description.chain), ['openai', 'claude']);
+});
+
+test('organizeTabs requests custom host permission before any grouping mutation', async () => {
+  const { chrome, context } = loadBackground();
+  const tabs = [
+    { id: 1, index: 0, pinned: false, groupId: -1, windowId: 1, title: 'One', url: 'https://example.com/one' },
+    { id: 2, index: 1, pinned: false, groupId: -1, windowId: 1, title: 'Two', url: 'https://example.com/two' },
+  ];
+  const callOrder = [];
+
+  chrome.storage.local.get = async () => ({
+    aiProvider: 'custom-openai',
+    aiFallbackEnabled: false,
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'model-a',
+    customOpenaiKey: 'key',
+  });
+  chrome.permissions.contains = async () => {
+    callOrder.push('contains');
+    return false;
+  };
+  chrome.permissions.request = async () => {
+    callOrder.push('request');
+    return false;
+  };
+  chrome.tabs.query = async (queryInfo = {}) => {
+    if (Object.prototype.hasOwnProperty.call(queryInfo, 'groupId')) return [];
+    return tabs.map((tab) => ({ ...tab }));
+  };
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.ungroup = async () => {
+    callOrder.push('ungroup');
+  };
+  context.fetch = async () => {
+    throw new Error('fetch should not run when permission is denied');
+  };
+
+  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+  assert.equal(result.success, false);
+  assert.match(result.error, /OpenAI Compatible API Host is not configured\./);
+  assert.match(result.error, /Fetch models/);
+  assert.equal(callOrder.includes('ungroup'), false);
+  assert.equal(callOrder.includes('request'), true);
+  assert.equal(callOrder.at(-1), 'contains');
+});
+
+test('custom OpenAI base URL keeps query values with trailing slashes', () => {
+  const { context } = loadBackground();
+
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://api.example.com/v1?sig=abc/'),
+    'https://api.example.com/v1?sig=abc/'
+  );
 });
 
 test('local model responses stream before they are parsed', async () => {

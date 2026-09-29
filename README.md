@@ -10,13 +10,14 @@ A Chrome extension that **deduplicates tabs**, **tidies pinned tab lists**, main
 - **Local storage**: Settings and optional credentials use `chrome.storage.local`. A credential goes only to its issuing service when you use that feature.
 - **No analytics**: No telemetry or tracking from this extension.
 - **Local AI options**: Chrome built-in AI processes prompts on your computer. A loopback provider sends prompts only to a server on your computer.
-- **Optional cloud features**: Cloud AI and GitHub tab groups send data only after you configure a key and use the applicable feature.
+- **Optional cloud features**: Cloud AI and GitHub tab groups send data only after you configure a provider and use the applicable feature.
+- **Custom OpenAI-compatible hosts**: The extension requests host access for a custom host only when you test or use that host. Remote custom hosts must use HTTPS. Plain HTTP is allowed only for loopback hosts on your own computer.
 - [Privacy Policy](PRIVACY_POLICY.md)
 - [Release notes](RELEASE_NOTES.md)
 
 ## Key features
 
-- **AI tab organization**: Group tabs with OpenAI, Anthropic, Google, Chrome built-in AI, or a loopback model server. Cloud providers use your API key. Provider fallback is opt-in.
+- **AI tab organization**: Group tabs with OpenAI, Anthropic, Google, Chrome built-in AI, a custom OpenAI-compatible host, or a loopback model server. Cloud providers usually use an API key. Provider fallback is opt-in.
 - **Duplicate detection**: Same base URL with different anchors/hashes; optional ignore-query / ignore-hash rules; case-insensitive matching.
 - **BOOKMARKS and pinned URLs**: Pin, unpin, and order tabs from a list. Choose the BOOKMARKS group colour; the default is yellow.
 - **PRs** (optional): Maintain a group for open pull requests and review requests, and choose its colour. The default is blue. Stale PR tabs leave the group but remain open.
@@ -31,6 +32,10 @@ Chrome built-in AI and the loopback provider do not need a provider API key.
 Provider fallback is off by default. If you enable it, a local provider can try the other local provider. Chrome built-in AI joins only after its model is downloaded. The loopback provider joins only after you set a model name.
 
 Cloud fallback requires a separate opt-in. Each attempted cloud provider receives the same sanitized tab data. A provider can receive the prompt even when its request fails.
+
+When the selected provider is **OpenAI Compatible API Host**, you must set a base URL and model name. API key use depends on the host. During test or organization, the extension requests access only to the configured host origin.
+
+For custom hosts on another machine or network, use `https://`. Remote `http://` endpoints are blocked. `http://` is supported only for loopback hosts (for example `localhost` and `127.0.0.1`).
 
 ### Chrome built-in AI (Gemini Nano)
 
@@ -189,6 +194,7 @@ Assign a key to **Organize tabs with AI** at `chrome://extensions/shortcuts`.
 | `notifications` | User feedback for long-running or batch actions (where implemented). |
 | `contextMenus` | Right-click commands for duplicate removal and tab organization. |
 | Host access for OpenAI, Anthropic, Gemini, GitHub | Used only for configured cloud AI and GitHub features. Cloud AI receives titles, sanitized URLs, custom instructions, and relevant group names. |
+| Optional host access for custom OpenAI-compatible hosts | Requested at runtime only when you test or use a configured custom host. Remote hosts must use HTTPS. |
 | Host access for `localhost` / `127.0.0.1` | Reaches a loopback model server. The extension rejects other hosts. |
 
 Details: [PRIVACY_POLICY.md](PRIVACY_POLICY.md).

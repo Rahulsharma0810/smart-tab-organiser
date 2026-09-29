@@ -669,9 +669,17 @@ footer {
   margin-bottom: 15px;
 }
 
+.provider-grid--compact {
+  grid-template-columns: 1fr;
+}
+
 @media (min-width: 1000px) {
   .provider-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .provider-grid--compact {
+    grid-template-columns: minmax(280px, 1fr);
   }
 
   .provider-grid--two {
@@ -689,6 +697,10 @@ footer {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.provider-card[hidden] {
+  display: none;
 }
 
 .provider-card--active {
@@ -749,6 +761,11 @@ footer {
 
 .field-label a:hover {
   text-decoration: underline;
+}
+
+.field-label-optional {
+  font-weight: 400;
+  color: var(--text-muted);
 }
 
 .provider-card .api-key-input,

@@ -28,6 +28,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const localModelInput = document.getElementById('localModel');
   const testLocalModelBtn = document.getElementById('testLocalModelBtn');
   const localModelStatus = document.getElementById('localModelStatus');
+  const customOpenaiBaseUrlInput = document.getElementById('customOpenaiBaseUrl');
+  const customOpenaiKeyInput = document.getElementById('customOpenaiKey');
+  const customOpenaiModelInput = document.getElementById('customOpenaiModel');
+  const testCustomOpenaiBtn = document.getElementById('testCustomOpenaiBtn');
+  const customOpenaiStatus = document.getElementById('customOpenaiStatus');
+  const customOpenaiModelsList = document.getElementById('customOpenaiModels');
   const checkChromeAiBtn = document.getElementById('checkChromeAiBtn');
   const downloadChromeAiBtn = document.getElementById('downloadChromeAiBtn');
   const chromeAiStatus = document.getElementById('chromeAiStatus');
@@ -35,6 +41,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const cloudFallbackRow = document.getElementById('cloudFallbackRow');
   const fallbackOrderItem = document.getElementById('fallbackOrderItem');
   const fallbackOrderList = document.getElementById('fallbackOrderList');
+  const cloudProviderGrid = document.getElementById('cloudProviderGrid');
   const providerCards = document.querySelectorAll('.provider-card[data-provider]');
 
   function updateModelRecommendedHint(provider, hintEl, selectEl) {
@@ -306,7 +313,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 'pinnedUrls',
     'githubToken', 'prGroupEnabled', 'prGroupColor', 'closedIssueGroupEnabled',
     'githubLabelGroupsEnabled', 'githubLabelGroupsOnClick', 'githubLabelGroupNames', 'githubLabelGroupColors',
-    'bookmarksGroupColor', 'localBaseUrl', 'localModel'
+    'bookmarksGroupColor', 'localBaseUrl', 'localModel',
+    'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel'
   ]);
   ignoreQueryCheckbox.checked = settings.ignoreQuery !== false; // default to true
   ignoreHashCheckbox.checked = settings.ignoreHash !== false; // default to true
@@ -330,6 +338,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const geminiResolved = globalThis.populateModelSelect(geminiModelSelect, 'gemini', settings.geminiModel);
   localBaseUrlInput.value = settings.localBaseUrl || '';
   localModelInput.value = settings.localModel || '';
+  customOpenaiBaseUrlInput.value = settings.customOpenaiBaseUrl || '';
+  customOpenaiKeyInput.value = settings.customOpenaiKey || '';
+  customOpenaiModelInput.value = settings.customOpenaiModel || '';
   updateModelRecommendedHint('openai', openaiModelRecommendedEl, openaiModelSelect);
   updateModelRecommendedHint('claude', claudeModelRecommendedEl, claudeModelSelect);
   updateModelRecommendedHint('gemini', geminiModelRecommendedEl, geminiModelSelect);
@@ -408,20 +419,76 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.storage.local.set({ geminiKey: geminiKeyInput.value.trim() });
   });
   
+  customOpenaiKeyInput.addEventListener('input', () => {
+    chrome.storage.local.set({ customOpenaiKey: customOpenaiKeyInput.value.trim() });
+  });
+  
   const PROVIDER_LABELS_OPTIONS = {
     openai: 'OpenAI',
     claude: 'Claude',
     gemini: 'Gemini',
     'chrome-ai': 'Chrome built-in AI',
-    local: 'Loopback model server'
+    local: 'Loopback model server',
+    'custom-openai': 'OpenAI Compatible API Host'
   };
   const LOCAL_PROVIDERS_OPTIONS = ['chrome-ai', 'local'];
+
+  function normalizeCustomBaseUrlForPermission(rawUrl) {
+    let url = (rawUrl || '').trim();
+    if (!url) return null;
+    if (!/^https?:\/\//i.test(url)) {
+      url = `https://${url}`;
+    }
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return null;
+    }
+    return parsed;
+  }
+
+  function isLoopbackHostnameOptions(hostname) {
+    const value = String(hostname || '').trim().toLowerCase();
+    const normalized = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
+    return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+  }
+
+  function isStaticallyAllowedLoopbackUrlOptions(parsed) {
+    if (!isLoopbackHostnameOptions(parsed?.hostname)) return false;
+    if ((parsed?.protocol || '').toLowerCase() !== 'http:') return false;
+    const host = String(parsed?.hostname || '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1';
+  }
+
+  async function requestCustomHostPermissionIfNeeded(rawBaseUrl) {
+    const parsed = normalizeCustomBaseUrlForPermission(rawBaseUrl);
+    if (!parsed) throw new Error('Enter a valid OpenAI-compatible base URL.');
+    if (isStaticallyAllowedLoopbackUrlOptions(parsed)) return;
+    if (parsed.protocol !== 'https:') {
+      throw new Error('Remote OpenAI-compatible hosts must use HTTPS. Use HTTPS, or keep HTTP only for localhost/127.0.0.1.');
+    }
+
+    const originPattern = `${parsed.protocol}//${parsed.host}/*`;
+    const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+    if (hasPermission) return;
+
+    const granted = await chrome.permissions.request({ origins: [originPattern] });
+    if (!granted) {
+      throw new Error(`Permission for ${originPattern} was not granted.`);
+    }
+  }
 
   // Row tags for each status describeProviderChain can report.
   const ORDER_TAG_TEXT = {
     primary: 'Primary — always first',
     ready: 'Ready',
     'no-key': 'No API key',
+    'missing-base-url': 'No base URL',
+    'missing-model-name': 'No model name',
+    'invalid-base-url': 'Invalid base URL',
+    'insecure-http-url': 'Remote HTTP blocked',
+    'missing-host-permission': 'Needs host permission',
     'not-downloaded': 'Model not downloaded',
     'no-model-name': 'No model name',
     'cloud-opt-in-off': 'Needs cloud fallback opt-in',
@@ -431,9 +498,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function updateActiveProviderCard() {
     const primary = aiProviderSelect.value || 'openai';
+    const isCloudPrimary = !LOCAL_PROVIDERS_OPTIONS.includes(primary);
+    const fallbackOn = aiFallbackEnabledCheckbox.checked;
     providerCards.forEach((card) => {
-      card.classList.toggle('provider-card--active', card.dataset.provider === primary);
+      const isSelected = card.dataset.provider === primary;
+      card.classList.toggle('provider-card--active', isSelected);
+      // Local provider cards always stay visible. Cloud cards stay visible whenever
+      // fallback is enabled so users can configure eligible cloud fallbacks.
+      const isCloud = !card.closest('.provider-grid--two');
+      const hideCloudCard = isCloud && isCloudPrimary && !fallbackOn && !isSelected;
+      card.hidden = hideCloudCard;
     });
+
+    const visibleCloudCards = Array.from(providerCards)
+      .filter((card) => !card.closest('.provider-grid--two') && !card.hidden)
+      .length;
+    if (cloudProviderGrid) {
+      cloudProviderGrid.classList.toggle('provider-grid--compact', visibleCloudCards <= 1);
+    }
   }
 
   // The cloud opt-in only applies to a local primary, and the order list
@@ -524,14 +606,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (aiAllowCloudFallbackCheckbox.checked) {
         parts.push(desc.chain.some((p) => !LOCAL_PROVIDERS_OPTIONS.includes(p))
           ? 'If a cloud fallback runs, tab titles and URLs are sent to that provider.'
-          : 'Cloud fallback is allowed, but no cloud provider has an API key yet.');
+          : 'Cloud fallback is allowed, but no cloud provider is fully configured yet.');
       } else {
         parts.push('Cloud providers will never be used.');
       }
     } else if (desc.chain.length > 1) {
       parts.push('Cloud primaries never fall back to local providers.');
     } else {
-      parts.push('Add an OpenAI, Claude or Gemini API key above to enable automatic fallback.');
+      const customStatus = statusByProvider.get('custom-openai');
+      if (customStatus === 'missing-base-url') {
+        parts.push('Set the OpenAI Compatible base URL to make it eligible for fallback.');
+      } else if (customStatus === 'missing-model-name') {
+        parts.push('Set the OpenAI Compatible model name to make it eligible for fallback.');
+      } else if (customStatus === 'invalid-base-url') {
+        parts.push('Fix the OpenAI Compatible base URL so the extension can use it.');
+      } else if (customStatus === 'insecure-http-url') {
+        parts.push('Remote OpenAI Compatible hosts must use HTTPS. HTTP is allowed only for localhost or 127.0.0.1.');
+      } else if (customStatus === 'missing-host-permission') {
+        parts.push('OpenAI Compatible host access is not granted yet. Click Fetch models for that host first.');
+      } else {
+        parts.push('Add an OpenAI, Claude, or Gemini API key above to enable automatic fallback.');
+      }
     }
     aiFallbackHintEl.textContent = parts.join(' ');
   }
@@ -582,7 +677,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Refresh when an API key changes (fallback eligibility depends on which keys are present)
-  [openaiKeyInput, claudeKeyInput, geminiKeyInput].forEach((input) => {
+  [openaiKeyInput, claudeKeyInput, geminiKeyInput, customOpenaiKeyInput].forEach((input) => {
     input.addEventListener('input', scheduleFallbackUiRefresh);
   });
   refreshProviderUi();
@@ -594,6 +689,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   localModelInput.addEventListener('input', () => {
     chrome.storage.local.set({ localModel: localModelInput.value.trim() });
     scheduleFallbackUiRefresh(); // the local fallback chain depends on a model name being set
+  });
+
+  customOpenaiBaseUrlInput.addEventListener('input', () => {
+    chrome.storage.local.set({ customOpenaiBaseUrl: customOpenaiBaseUrlInput.value.trim() });
+    scheduleFallbackUiRefresh();
+  });
+
+  customOpenaiModelInput.addEventListener('input', () => {
+    chrome.storage.local.set({ customOpenaiModel: customOpenaiModelInput.value.trim() });
+    scheduleFallbackUiRefresh();
   });
 
   // Ask the service worker to check the local server, so the result reflects
@@ -627,6 +732,58 @@ document.addEventListener('DOMContentLoaded', async () => {
       localModelStatus.className = 'status error';
     } finally {
       testLocalModelBtn.disabled = false;
+    }
+  });
+
+  // Ask the service worker to test the OpenAI-compatible host, so the result
+  // reflects the context that actually organizes tabs.
+  testCustomOpenaiBtn.addEventListener('click', async () => {
+    testCustomOpenaiBtn.disabled = true;
+    customOpenaiStatus.textContent = 'Testing connection...';
+    customOpenaiStatus.className = 'status info';
+    try {
+      await requestCustomHostPermissionIfNeeded(customOpenaiBaseUrlInput.value.trim());
+      const result = await chrome.runtime.sendMessage({
+        action: 'testCustomOpenAI',
+        baseUrl: customOpenaiBaseUrlInput.value.trim(),
+        apiKey: customOpenaiKeyInput.value.trim()
+      });
+      if (!result) {
+        customOpenaiStatus.textContent =
+          'No response from the service worker. Reload the extension (chrome://extensions → refresh) and try again.';
+        customOpenaiStatus.className = 'status error';
+        return;
+      }
+      if (!result.success) {
+        customOpenaiStatus.textContent = result.error || 'Could not reach the OpenAI-compatible host';
+        customOpenaiStatus.className = 'status error';
+        return;
+      }
+      if (result.models.length === 0) {
+        customOpenaiStatus.textContent = `Connected to ${result.baseUrl}, but no models were listed.`;
+        customOpenaiStatus.className = 'status error';
+        return;
+      }
+      // Populate the model dropdown (combobox) with the upstream catalog.
+      customOpenaiModelsList.textContent = '';
+      for (const model of result.models) {
+        const option = document.createElement('option');
+        option.value = model;
+        customOpenaiModelsList.append(option);
+      }
+      const chosen = customOpenaiModelInput.value.trim();
+      const known = result.models.includes(chosen);
+      const preview = result.models.slice(0, 8).join(', ');
+      const more = result.models.length > 8 ? ` … and ${result.models.length - 8} more` : '';
+      customOpenaiStatus.textContent =
+        `Connected to ${result.baseUrl}. ${result.models.length} models available (${preview}${more}).` +
+        (chosen && !known ? ` Warning: "${chosen}" is not in that list.` : '');
+      customOpenaiStatus.className = chosen && !known ? 'status info' : 'status success';
+    } catch (error) {
+      customOpenaiStatus.textContent = 'Error: ' + error.message;
+      customOpenaiStatus.className = 'status error';
+    } finally {
+      testCustomOpenaiBtn.disabled = false;
     }
   });
 
@@ -1014,4 +1171,3 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 });
-

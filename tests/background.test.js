@@ -257,6 +257,12 @@ test('provider fallback is disabled until the user enables it', async () => {
   assert.deepEqual(Array.from(description.chain), ['openai']);
 });
 
+test('Chrome built-in AI remains configured without an API key', async () => {
+  const { context } = loadBackground();
+
+  assert.equal(await context.providerConfigurationStatus('chrome-ai', {}), 'ready');
+});
+
 test('custom OpenAI host normalization preserves explicit paths and defaults origin-only input to /v1', () => {
   const { context } = loadBackground();
 

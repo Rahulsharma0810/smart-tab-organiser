@@ -3472,6 +3472,7 @@ function providerHasKey(provider, settings) {
 }
 
 async function providerConfigurationStatus(provider, settings) {
+  if (provider === 'chrome-ai') return 'ready'; // Availability is checked when the provider runs.
   if (provider === 'custom-openai') {
     if (!settings.customOpenaiBaseUrl?.trim()) return 'missing-base-url';
     if (!settings.customOpenaiModel?.trim()) return 'missing-model-name';

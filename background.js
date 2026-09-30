@@ -981,7 +981,7 @@ function scheduleAutoOrganize(windowId) {
     try {
       // Get current settings
       const settings = await chrome.storage.local.get(['autoOrganizeEnabled', 'autoOrganizeDelay']);
-      
+
       // Check if this scheduling was invalidated by a newer call (P1 issue #2)
       if (generation !== autoOrganizeGenerations.get(windowId)) {
         return;

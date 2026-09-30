@@ -885,6 +885,15 @@ async function runOrganizeWithFeedback(windowId, options = {}) {
     chrome.action.setTitle({ title: 'Dedupe and tidy pinned tabs (left-click)' }).catch(() => {});
     chrome.contextMenus.update('dedupe-and-organize', { enabled: true }).catch(() => {});
     updateBadge(); // Restore duplicate-count badge
+
+    // Check if any windows have pending auto-organize runs
+    for (const [windowId, isPending] of autoOrganizePending) {
+      if (isPending) {
+        autoOrganizePending.delete(windowId);
+        // Retry the auto-organize for this window
+        scheduleAutoOrganize(windowId);
+      }
+    }
   }
 }
 
@@ -944,6 +953,129 @@ async function runDedupeAndTidyPinned(windowId, options = {}) {
     updateBadge();
   }
 }
+
+// Auto-organize: per-window timers and pending state
+const autoOrganizeTimers = new Map(); // windowId -> timeout handle
+const autoOrganizePending = new Map(); // windowId -> boolean (whether a run is queued)
+const ALARM_THRESHOLD_SECONDS = 30;
+
+// Schedule auto-organize for a specific window
+function scheduleAutoOrganize(windowId) {
+  (async () => {
+    try {
+      // Get current settings
+      const settings = await chrome.storage.local.get(['autoOrganizeEnabled', 'autoOrganizeDelay']);
+      const enabled = settings.autoOrganizeEnabled === true;
+      const delaySeconds = Number(settings.autoOrganizeDelay) || 5;
+
+      // If disabled, clear any pending work for this window
+      if (!enabled) {
+        const existingTimer = autoOrganizeTimers.get(windowId);
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          autoOrganizeTimers.delete(windowId);
+        }
+        chrome.alarms.clear(`autoOrganize_${windowId}`);
+        autoOrganizePending.delete(windowId);
+        return;
+      }
+
+      // Check if there are any organizable tabs in this window
+      const validTabs = await getOrganizableTabs(windowId);
+      if (validTabs.length === 0) {
+        return; // No valid tabs to organize
+      }
+
+      // Clear existing timer/alarm for this window (debouncing)
+      const existingTimer = autoOrganizeTimers.get(windowId);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        autoOrganizeTimers.delete(windowId);
+      }
+      chrome.alarms.clear(`autoOrganize_${windowId}`);
+
+      // For delays >30s, use chrome.alarms API (service worker safe)
+      if (delaySeconds > ALARM_THRESHOLD_SECONDS) {
+        chrome.alarms.create(`autoOrganize_${windowId}`, {
+          delayInMinutes: delaySeconds / 60
+        });
+      } else {
+        // For delays <=30s, use setTimeout
+        const timer = setTimeout(() => {
+          executeAutoOrganize(windowId);
+          autoOrganizeTimers.delete(windowId);
+        }, delaySeconds * 1000);
+        autoOrganizeTimers.set(windowId, timer);
+      }
+    } catch (error) {
+      console.error('Error scheduling auto-organize:', error);
+    }
+  })();
+}
+
+// Execute auto-organize for a window
+async function executeAutoOrganize(windowId) {
+  try {
+    // Re-check settings at execution time (user may have disabled it during delay)
+    const settings = await chrome.storage.local.get(['autoOrganizeEnabled']);
+    if (settings.autoOrganizeEnabled !== true) {
+      autoOrganizePending.delete(windowId);
+      return; // User disabled it while timer was pending
+    }
+
+    // Check if there are any organizable tabs
+    const validTabs = await getOrganizableTabs(windowId);
+    if (validTabs.length === 0) {
+      autoOrganizePending.delete(windowId);
+      return; // No valid tabs to organize
+    }
+
+    // If already organizing, mark as pending and retry after current run
+    if (isOrganizing) {
+      autoOrganizePending.set(windowId, true);
+      return;
+    }
+
+    // Clear pending flag and run organization
+    autoOrganizePending.delete(windowId);
+    await runOrganizeWithFeedback(windowId, { silent: true });
+  } catch (error) {
+    console.error('Error executing auto-organize:', error);
+    autoOrganizePending.delete(windowId);
+  }
+}
+
+// Listen for chrome.alarms for delays >30s
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith('autoOrganize_')) {
+    const windowId = Number(alarm.name.replace('autoOrganize_', ''));
+    if (!isNaN(windowId)) {
+      executeAutoOrganize(windowId);
+    }
+  }
+});
+
+// Listen for new tabs and schedule auto-organize for that window
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.windowId) {
+    scheduleAutoOrganize(tab.windowId);
+  }
+});
+
+// Listen for storage changes to handle opt-out during pending timer
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.autoOrganizeEnabled) {
+    // If user disabled auto-organize, clear all pending timers
+    if (changes.autoOrganizeEnabled.newValue !== true) {
+      for (const [windowId, timer] of autoOrganizeTimers) {
+        clearTimeout(timer);
+        chrome.alarms.clear(`autoOrganize_${windowId}`);
+      }
+      autoOrganizeTimers.clear();
+      autoOrganizePending.clear();
+    }
+  }
+});
 
 // Handle extension icon left click - dedupe then tidy pinned tabs
 // (or the full dedupe + AI organize flow when "Organize tabs on click" is enabled)
@@ -4150,39 +4282,56 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   
   if (request.action === 'organizeTabs') {
     (async () => {
-      const targetWindowId = await resolveTargetWindowId(request.windowId);
-      const githubPrSync = await syncEnabledGitHubTabGroups(targetWindowId, {
-        includePr: true,
-        includeIssues: false,
-      }).catch(() => ({ stopRemainingSyncs: false }));
-      const dedupeSettings = await chrome.storage.local.get([
-        'ignoreQuery', 'ignoreHash', 'reloadTabs', 'preserveGroupsMinTabs'
-      ]);
-      const dedupeResult = await closeDuplicates(
-        dedupeSettings.ignoreQuery !== false,
-        dedupeSettings.ignoreHash !== false,
-        dedupeSettings.reloadTabs === true,
-        targetWindowId
-      );
-      if (!dedupeResult.success) return dedupeResult;
-      const githubIssueSync = await syncEnabledGitHubTabGroups(targetWindowId, {
-        includePr: false,
-        includeIssues: true,
-        blockedByEarlierSync: githubPrSync.stopRemainingSyncs,
-      }).catch(() => ({ preservedTabIds: [] }));
+      // Check for concurrent organization
+      if (isOrganizing) {
+        return { success: false, error: 'Organization already in progress' };
+      }
+      isOrganizing = true;
 
-      // A caller can omit preserveGroupsMinTabs. Use the saved value instead of 1.
-      const minTabsRaw = request.preserveGroupsMinTabs ?? dedupeSettings.preserveGroupsMinTabs;
-      const result = await organizeTabs(
-        request.preserveGroups,
-        request.mergeIntoExisting || false,
-        request.customInstructions,
-        parseMinTabs(minTabsRaw),
-        targetWindowId,
-        githubIssueSync.preservedTabIds
-      );
-      await reconcileManagedTabGroupsSafely(targetWindowId);
-      return result;
+      try {
+        const targetWindowId = await resolveTargetWindowId(request.windowId);
+        const githubPrSync = await syncEnabledGitHubTabGroups(targetWindowId, {
+          includePr: true,
+          includeIssues: false,
+        }).catch(() => ({ stopRemainingSyncs: false }));
+        const dedupeSettings = await chrome.storage.local.get([
+          'ignoreQuery', 'ignoreHash', 'reloadTabs', 'preserveGroupsMinTabs'
+        ]);
+        const dedupeResult = await closeDuplicates(
+          dedupeSettings.ignoreQuery !== false,
+          dedupeSettings.ignoreHash !== false,
+          dedupeSettings.reloadTabs === true,
+          targetWindowId
+        );
+        if (!dedupeResult.success) return dedupeResult;
+        const githubIssueSync = await syncEnabledGitHubTabGroups(targetWindowId, {
+          includePr: false,
+          includeIssues: true,
+          blockedByEarlierSync: githubPrSync.stopRemainingSyncs,
+        }).catch(() => ({ preservedTabIds: [] }));
+
+        // A caller can omit preserveGroupsMinTabs. Use the saved value instead of 1.
+        const minTabsRaw = request.preserveGroupsMinTabs ?? dedupeSettings.preserveGroupsMinTabs;
+        const result = await organizeTabs(
+          request.preserveGroups,
+          request.mergeIntoExisting || false,
+          request.customInstructions,
+          parseMinTabs(minTabsRaw),
+          targetWindowId,
+          githubIssueSync.preservedTabIds
+        );
+        await reconcileManagedTabGroupsSafely(targetWindowId);
+        return result;
+      } finally {
+        isOrganizing = false;
+        // Check for pending auto-organize runs
+        for (const [windowId, isPending] of autoOrganizePending) {
+          if (isPending) {
+            autoOrganizePending.delete(windowId);
+            scheduleAutoOrganize(windowId);
+          }
+        }
+      }
     })()
       .then(result => sendResponse(result))
       .catch(error => sendResponse({ success: false, error: error.message }));

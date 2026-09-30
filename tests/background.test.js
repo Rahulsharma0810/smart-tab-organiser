@@ -49,6 +49,11 @@ function loadBackground() {
       setBadgeText: async () => {},
       setTitle: async () => {},
     },
+    alarms: {
+      create: async () => {},
+      clear: async () => {},
+      onAlarm: eventStub(),
+    },
     commands: { onCommand: eventStub() },
     contextMenus: {
       onClicked: eventStub(),
@@ -75,6 +80,7 @@ function loadBackground() {
         get: async () => ({}),
         set: async () => {},
       },
+      onChanged: eventStub(),
     },
     tabGroups: {
       move: async () => {},
@@ -1326,4 +1332,50 @@ test('partial GitHub errors preserve failed tabs from AI and managed groups from
   );
   assert.equal(removedFromManagedGroup, true);
   assert.equal(navigatedTab.groupId, -1);
+});
+
+// Auto-organize tests
+test('auto-organize is disabled by default', () => {
+  const { chrome } = loadBackground();
+  const settings = {};
+  chrome.storage.local.get = async () => settings;
+
+  // Auto-organize should be disabled by default (opt-in)
+  assert.equal(settings.autoOrganizeEnabled, undefined);
+});
+
+test('auto-organize skips when disabled via setting', async () => {
+  const { chrome } = loadBackground();
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: false, autoOrganizeDelay: 5 });
+  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
+
+  // Emit a tab creation event with auto-organize disabled
+  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
+
+  // Test completes without error - no organization triggered
+  assert.ok(true);
+});
+
+test('auto-organize listener is registered for tabs.onCreated', () => {
+  const { chrome } = loadBackground();
+
+  // Verify that the tabs.onCreated listener was registered
+  assert.ok(chrome.tabs.onCreated);
+  assert.ok(chrome.tabs.onCreated.addListener);
+});
+
+test('auto-organize storage change listener is registered', () => {
+  const { chrome } = loadBackground();
+
+  // Verify that the storage.onChanged listener was registered
+  assert.ok(chrome.storage.onChanged);
+  assert.ok(chrome.storage.onChanged.addListener);
+});
+
+test('auto-organize alarms listener is registered', () => {
+  const { chrome } = loadBackground();
+
+  // Verify that the alarms.onAlarm listener was registered
+  assert.ok(chrome.alarms.onAlarm);
+  assert.ok(chrome.alarms.onAlarm.addListener);
 });

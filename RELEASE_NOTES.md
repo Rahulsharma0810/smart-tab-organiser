@@ -15,7 +15,7 @@
 
 ### Fixed
 
-- Fixed Chrome built-in AI returning "unexpected response" error. The Prompt API with `responseConstraint` returns JSON directly, not wrapped in text or markdown.
+- Chrome built-in AI no longer fails with "unexpected response" when Gemini Nano returns an empty batch or a group without tab numbers. The extension now drops only the empty groups.
 
 ## 1.3.1 — August 20, 2026
 

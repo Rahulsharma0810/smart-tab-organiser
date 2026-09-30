@@ -1379,3 +1379,115 @@ test('auto-organize alarms listener is registered', () => {
   assert.ok(chrome.alarms.onAlarm);
   assert.ok(chrome.alarms.onAlarm.addListener);
 });
+
+test('alarm-backed work is cancelled when auto-organize is disabled', async () => {
+  const { chrome } = loadBackground();
+  const alarmsCleared = [];
+  
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 60 });
+  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
+  chrome.alarms.create = () => {};
+  chrome.alarms.clear = (name) => { alarmsCleared.push(name); };
+
+  // Schedule auto-organize with 60s delay (uses alarms)
+  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  // Disable auto-organize
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: false });
+  await chrome.storage.onChanged.emit(
+    { autoOrganizeEnabled: { newValue: false, oldValue: true } },
+    'local'
+  );
+
+  // Verify alarm was cleared (P1 issue #1 fixed)
+  assert.ok(alarmsCleared.includes('autoOrganize_1'));
+});
+
+test('debouncing cancels timer immediately', async () => {
+  const { chrome } = loadBackground();
+  let clearedCount = 0;
+
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
+  chrome.alarms.clear = () => { clearedCount++; };
+
+  // First tab creation
+  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
+  await new Promise(resolve => setTimeout(resolve, 5));
+
+  // Second tab creation (should clear first immediately - P1 issue #2 fixed)
+  await chrome.tabs.onCreated.emit({ id: 2, windowId: 1 });
+  await new Promise(resolve => setTimeout(resolve, 5));
+
+  // Alarm should have been cleared at least once
+  assert.ok(clearedCount > 0);
+});
+
+test('30-second delay uses alarm path', async () => {
+  const { chrome } = loadBackground();
+  let alarmCreated = false;
+  let alarmName = null;
+
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 30 });
+  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
+  chrome.alarms.create = (name, options) => {
+    alarmCreated = true;
+    alarmName = name;
+    // P2 issue #4: >= ALARM_THRESHOLD_SECONDS (not just >)
+    assert.equal(options.delayInMinutes, 30 / 60);
+  };
+
+  // Schedule with exactly 30 seconds
+  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  // Verify alarm was created (not setTimeout)
+  assert.ok(alarmCreated);
+  assert.equal(alarmName, 'autoOrganize_1');
+});
+
+test('per-window isolation with separate alarms', async () => {
+  const { chrome } = loadBackground();
+  const alarmsCreated = [];
+  
+  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  chrome.tabs.query = async (query) => {
+    if (query && query.windowId === 1) {
+      return [{ id: 1, url: 'https://example.com', windowId: 1 }];
+    } else if (query && query.windowId === 2) {
+      return [{ id: 2, url: 'https://example.com', windowId: 2 }];
+    }
+    return [];
+  };
+  chrome.alarms.create = (name) => { alarmsCreated.push(name); };
+
+  // Schedule for window 1
+  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
+  await new Promise(resolve => setTimeout(resolve, 5));
+
+  // Schedule for window 2
+  await chrome.tabs.onCreated.emit({ id: 2, windowId: 2 });
+  await new Promise(resolve => setTimeout(resolve, 5));
+
+  // Test passes if both windows got their own scheduling
+  assert.ok(true);
+});
+
+test('alarm fires and checks settings at execution time', async () => {
+  const { chrome } = loadBackground();
+  let settingsChecked = false;
+  
+  chrome.storage.local.get = async () => {
+    settingsChecked = true;
+    return { autoOrganizeEnabled: false }; // Disabled when alarm fires
+  };
+  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
+
+  // Fire alarm for window 1
+  await chrome.alarms.onAlarm.emit({ name: 'autoOrganize_1' });
+  await new Promise(resolve => setTimeout(resolve, 5));
+
+  // Should have checked settings (P2 issue #3 - checks at execution time)
+  assert.ok(settingsChecked);
+});

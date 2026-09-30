@@ -956,51 +956,55 @@ async function runDedupeAndTidyPinned(windowId, options = {}) {
 
 // Auto-organize: per-window timers and pending state
 const autoOrganizeTimers = new Map(); // windowId -> timeout handle
+const autoOrganizeAlarms = new Set(); // windowIds using chrome.alarms
 const autoOrganizePending = new Map(); // windowId -> boolean (whether a run is queued)
 const ALARM_THRESHOLD_SECONDS = 30;
+let autoOrganizeGeneration = 0; // Invalidates stale async scheduling
 
 // Schedule auto-organize for a specific window
 function scheduleAutoOrganize(windowId) {
+  // Cancel existing timer/alarm immediately before any async work (P1 issue #2)
+  const existingTimer = autoOrganizeTimers.get(windowId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    autoOrganizeTimers.delete(windowId);
+  }
+  chrome.alarms.clear(`autoOrganize_${windowId}`);
+  autoOrganizeAlarms.delete(windowId);
+
+  // Increment generation to invalidate any in-flight scheduling for this window
+  const generation = ++autoOrganizeGeneration;
+
   (async () => {
     try {
       // Get current settings
       const settings = await chrome.storage.local.get(['autoOrganizeEnabled', 'autoOrganizeDelay']);
+      
+      // Check if this scheduling was invalidated by a newer call (P1 issue #2)
+      if (generation !== autoOrganizeGeneration) {
+        return;
+      }
+
       const enabled = settings.autoOrganizeEnabled === true;
       const delaySeconds = Number(settings.autoOrganizeDelay) || 5;
 
       // If disabled, clear any pending work for this window
       if (!enabled) {
-        const existingTimer = autoOrganizeTimers.get(windowId);
-        if (existingTimer) {
-          clearTimeout(existingTimer);
-          autoOrganizeTimers.delete(windowId);
-        }
-        chrome.alarms.clear(`autoOrganize_${windowId}`);
         autoOrganizePending.delete(windowId);
         return;
       }
 
-      // Check if there are any organizable tabs in this window
-      const validTabs = await getOrganizableTabs(windowId);
-      if (validTabs.length === 0) {
-        return; // No valid tabs to organize
-      }
+      // Check at execution time instead of scheduling time (P2 issue #3)
+      // This handles tabs with pendingUrl that haven't committed yet
 
-      // Clear existing timer/alarm for this window (debouncing)
-      const existingTimer = autoOrganizeTimers.get(windowId);
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-        autoOrganizeTimers.delete(windowId);
-      }
-      chrome.alarms.clear(`autoOrganize_${windowId}`);
-
-      // For delays >30s, use chrome.alarms API (service worker safe)
-      if (delaySeconds > ALARM_THRESHOLD_SECONDS) {
+      // For delays >=30s, use chrome.alarms API (service worker safe) (P2 issue #4)
+      if (delaySeconds >= ALARM_THRESHOLD_SECONDS) {
         chrome.alarms.create(`autoOrganize_${windowId}`, {
           delayInMinutes: delaySeconds / 60
         });
+        autoOrganizeAlarms.add(windowId);
       } else {
-        // For delays <=30s, use setTimeout
+        // For delays <30s, use setTimeout
         const timer = setTimeout(() => {
           executeAutoOrganize(windowId);
           autoOrganizeTimers.delete(windowId);
@@ -1016,6 +1020,9 @@ function scheduleAutoOrganize(windowId) {
 // Execute auto-organize for a window
 async function executeAutoOrganize(windowId) {
   try {
+    // Remove from alarms tracking set
+    autoOrganizeAlarms.delete(windowId);
+
     // Re-check settings at execution time (user may have disabled it during delay)
     const settings = await chrome.storage.local.get(['autoOrganizeEnabled']);
     if (settings.autoOrganizeEnabled !== true) {
@@ -1023,7 +1030,8 @@ async function executeAutoOrganize(windowId) {
       return; // User disabled it while timer was pending
     }
 
-    // Check if there are any organizable tabs
+    // Check if there are any organizable tabs at execution time (P2 issue #3)
+    // This handles tabs that had pendingUrl at creation time
     const validTabs = await getOrganizableTabs(windowId);
     if (validTabs.length === 0) {
       autoOrganizePending.delete(windowId);
@@ -1065,14 +1073,24 @@ chrome.tabs.onCreated.addListener((tab) => {
 // Listen for storage changes to handle opt-out during pending timer
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.autoOrganizeEnabled) {
-    // If user disabled auto-organize, clear all pending timers
+    // If user disabled auto-organize, clear all pending timers and alarms (P1 issue #1)
     if (changes.autoOrganizeEnabled.newValue !== true) {
+      // Clear setTimeout timers
       for (const [windowId, timer] of autoOrganizeTimers) {
         clearTimeout(timer);
-        chrome.alarms.clear(`autoOrganize_${windowId}`);
       }
       autoOrganizeTimers.clear();
+
+      // Clear chrome.alarms for all tracked alarm windows
+      for (const windowId of autoOrganizeAlarms) {
+        chrome.alarms.clear(`autoOrganize_${windowId}`);
+      }
+      autoOrganizeAlarms.clear();
+
       autoOrganizePending.clear();
+
+      // Increment generation to invalidate any in-flight scheduling
+      autoOrganizeGeneration++;
     }
   }
 });
@@ -3499,9 +3517,39 @@ async function callChromeAI(tabs, customInstructions, existingGroups = null, min
       session.destroy();
     }
 
-    const groups = parseAiGroupsResponse((content || '').trim());
-    if (!groups) {
-      console.warn('[Smart Tab Organiser] Chrome AI: invalid format. Content preview:', (content || '').slice(0, 200));
+    // When using responseConstraint, Chrome AI returns the JSON structure directly,
+    // not wrapped in text or markdown. Parse it as JSON.
+    let groups;
+    try {
+      console.log('[Smart Tab Organiser] Chrome AI raw response:', content);
+      console.log('[Smart Tab Organiser] Chrome AI response type:', typeof content);
+      groups = JSON.parse(content || '[]');
+      console.log('[Smart Tab Organiser] Chrome AI parsed groups:', groups);
+      
+      // Validate the groups array structure
+      if (!Array.isArray(groups)) {
+        console.error('[Smart Tab Organiser] Chrome AI response is not an array:', groups);
+        throw new Error('Response is not an array');
+      }
+      
+      // Check each group is valid (but allow empty array)
+      for (const group of groups) {
+        if (!group || typeof group !== 'object') {
+          console.error('[Smart Tab Organiser] Chrome AI invalid group object:', group);
+          throw new Error('Invalid group object');
+        }
+        if (typeof group.groupName !== 'string') {
+          console.error('[Smart Tab Organiser] Chrome AI invalid groupName:', group);
+          throw new Error('Invalid groupName');
+        }
+        if (!Array.isArray(group.tabIndices)) {
+          console.error('[Smart Tab Organiser] Chrome AI invalid tabIndices:', group);
+          throw new Error('Invalid tabIndices');
+        }
+      }
+    } catch (error) {
+      console.error('[Smart Tab Organiser] Chrome AI parsing error:', error);
+      console.error('[Smart Tab Organiser] Chrome AI content preview:', (content || '').slice(0, 500));
       throw new Error('Invalid response format from Chrome built-in AI');
     }
 
@@ -4324,6 +4372,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         return result;
       } finally {
         isOrganizing = false;
+        // Refresh badge after organization completes (P3 issue #5)
+        updateBadge();
         // Check for pending auto-organize runs
         for (const [windowId, isPending] of autoOrganizePending) {
           if (isPending) {

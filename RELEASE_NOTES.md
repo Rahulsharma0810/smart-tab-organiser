@@ -13,6 +13,10 @@
 - Managed groups now appear after pinned tabs in this order: BOOKMARKS, PRs, configured labels, Closed.
 - Default label colours avoid the BOOKMARKS, PRs, and Closed colours until the available palette is full.
 
+### Fixed
+
+- Fixed Chrome built-in AI returning "unexpected response" error. The Prompt API with `responseConstraint` returns JSON directly, not wrapped in text or markdown.
+
 ## 1.3.1 — August 20, 2026
 
 ### Changed

@@ -3529,8 +3529,30 @@ async function callChromeAI(tabs, customInstructions, existingGroups = null, min
       session.destroy();
     }
 
-    const groups = parseAiGroupsResponse((content || '').trim());
-    if (!groups) {
+    // When using responseConstraint, Chrome AI returns the JSON structure directly,
+    // not wrapped in text or markdown. Parse it as JSON.
+    let groups;
+    try {
+      groups = JSON.parse(content || '[]');
+      
+      // Validate the groups array structure
+      if (!Array.isArray(groups)) {
+        throw new Error('Response is not an array');
+      }
+      
+      // Check each group is valid (but allow empty array)
+      for (const group of groups) {
+        if (!group || typeof group !== 'object') {
+          throw new Error('Invalid group object');
+        }
+        if (typeof group.groupName !== 'string') {
+          throw new Error('Invalid groupName');
+        }
+        if (!Array.isArray(group.tabIndices)) {
+          throw new Error('Invalid tabIndices');
+        }
+      }
+    } catch (error) {
       console.warn('[Smart Tab Organiser] Chrome AI: invalid format. Content preview:', (content || '').slice(0, 200));
       throw new Error('Invalid response format from Chrome built-in AI');
     }

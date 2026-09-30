@@ -419,6 +419,9 @@
               <br>When disabled, all tabs will be reorganized into new groups.
               <br><strong>Pinned tabs and groups named "BOOKMARKS" and "PRs" are always preserved</strong>, regardless of this setting.
             </p>
+            <p id="preserveGroupsRefineNote" class="setting-warning" style="display: none;">
+              Turned off because "Refine existing groups" is on. Refine keeps your groups and adds tabs to them.
+            </p>
           </div>
           <label class="switch">
             <input type="checkbox" id="preserveGroups">
@@ -448,6 +451,9 @@
               When enabled, the AI will intelligently merge ungrouped tabs into existing groups where appropriate.
               <br>This works best when "Preserve existing groups" is also enabled. The AI will analyze existing groups and merge new tabs into them.
               <br><strong>Pinned tabs and the "BOOKMARKS" group are always preserved</strong>; these options apply to other groups only.
+            </p>
+            <p id="mergeIntoExistingRefineNote" class="setting-warning" style="display: none;">
+              Turned off because "Refine existing groups" is on. Refine keeps your groups and adds tabs to them.
             </p>
           </div>
           <label class="switch">

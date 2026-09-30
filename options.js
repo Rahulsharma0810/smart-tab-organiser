@@ -69,6 +69,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const preserveGroupsMinTabsRow = document.getElementById('preserveGroupsMinTabsRow');
   const preserveGroupsMinTabsWarning = document.getElementById('preserveGroupsMinTabsWarning');
   const mergeIntoExistingCheckbox = document.getElementById('mergeIntoExisting');
+  const refineExistingGroupsCheckbox = document.getElementById('refineExistingGroups');
+  const excludedDomainsInput = document.getElementById('excludedDomains');
   const sortTabsWithinGroupsByTitleCheckbox = document.getElementById('sortTabsWithinGroupsByTitle');
   const organizeOnClickCheckbox = document.getElementById('organizeOnClick');
   const organizeTabsBtn = document.getElementById('organizeTabsBtn');
@@ -310,7 +312,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     'ignoreQuery', 'ignoreHash', 'reloadTabs',
     'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled', 'aiAllowCloudFallback',
     'openaiModel', 'claudeModel', 'geminiModel', 'customInstructionsOptions',
-    'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 'pinnedUrls',
+    'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'refineExistingGroups', 'excludedDomains', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 'pinnedUrls',
     'githubToken', 'prGroupEnabled', 'prGroupColor', 'closedIssueGroupEnabled',
     'githubLabelGroupsEnabled', 'githubLabelGroupsOnClick', 'githubLabelGroupNames', 'githubLabelGroupColors',
     'bookmarksGroupColor', 'localBaseUrl', 'localModel',
@@ -359,6 +361,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     customInstructionsOptions.value = settings.customInstructionsOptions;
   }
   preserveGroupsCheckbox.checked = settings.preserveGroups !== false; // default to true
+  refineExistingGroupsCheckbox.checked = settings.refineExistingGroups === true;
+  excludedDomainsInput.value = typeof settings.excludedDomains === 'string' ? settings.excludedDomains : '';
   const savedMinTabs = settings.preserveGroupsMinTabs;
   preserveGroupsMinTabsInput.value = savedMinTabs !== undefined && savedMinTabs !== '' ? Number(savedMinTabs) : 1;
   updatePreserveGroupsMinTabsVisibility();
@@ -863,11 +867,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.storage.local.set({ customInstructionsOptions: customInstructionsOptions.value.trim() });
   });
   
+  excludedDomainsInput.addEventListener('input', () => {
+    chrome.storage.local.set({ excludedDomains: excludedDomainsInput.value });
+  });
+
+  // Refine mode replaces preserve/merge; the minimum size still applies to new groups.
   function updatePreserveGroupsMinTabsVisibility() {
-    const visible = preserveGroupsCheckbox.checked;
+    const refine = refineExistingGroupsCheckbox.checked;
+    preserveGroupsCheckbox.disabled = refine;
+    mergeIntoExistingCheckbox.disabled = refine;
+    const visible = preserveGroupsCheckbox.checked || refine;
     preserveGroupsMinTabsRow.style.display = visible ? '' : 'none';
     preserveGroupsMinTabsInput.disabled = !visible;
   }
+
+  refineExistingGroupsCheckbox.addEventListener('change', () => {
+    chrome.storage.local.set({ refineExistingGroups: refineExistingGroupsCheckbox.checked });
+    updatePreserveGroupsMinTabsVisibility();
+  });
 
   function updatePreserveGroupsMinTabsWarning() {
     const n = parseInt(preserveGroupsMinTabsInput.value, 10);
@@ -1101,7 +1118,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       if (result.success) {
-        let msg = `Organized ${result.groupedCount} tab(s) into ${result.groupCount} group(s).`;
+        let msg = result.refined
+          ? `Moved ${result.movedCount} tab(s); created ${result.groupCount} group(s).`
+          : `Organized ${result.groupedCount} tab(s) into ${result.groupCount} group(s).`;
         if (result.fallbackInfo) {
           msg += ` Used ${result.providerUsedLabel} after ${result.fallbackInfo.primaryFailedLabel} failed (${result.fallbackInfo.primaryFailedSummary}).`;
         }

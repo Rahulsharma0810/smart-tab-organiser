@@ -73,6 +73,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const excludedDomainsInput = document.getElementById('excludedDomains');
   const sortTabsWithinGroupsByTitleCheckbox = document.getElementById('sortTabsWithinGroupsByTitle');
   const organizeOnClickCheckbox = document.getElementById('organizeOnClick');
+  const autoOrganizeEnabledCheckbox = document.getElementById('autoOrganizeEnabled');
+  const autoOrganizeDelayInput = document.getElementById('autoOrganizeDelay');
   const organizeTabsBtn = document.getElementById('organizeTabsBtn');
   const tidyPinnedBtn = document.getElementById('tidyPinnedBtn');
   const ungroupTabsBtn = document.getElementById('ungroupTabsBtn');
@@ -313,6 +315,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled', 'aiAllowCloudFallback',
     'openaiModel', 'claudeModel', 'geminiModel', 'customInstructionsOptions',
     'preserveGroups', 'preserveGroupsMinTabs', 'mergeIntoExisting', 'refineExistingGroups', 'excludedDomains', 'sortTabsWithinGroupsByTitle', 'organizeOnClick', 'pinnedUrls',
+    'autoOrganizeEnabled', 'autoOrganizeDelay',
     'githubToken', 'prGroupEnabled', 'prGroupColor', 'closedIssueGroupEnabled',
     'githubLabelGroupsEnabled', 'githubLabelGroupsOnClick', 'githubLabelGroupNames', 'githubLabelGroupColors',
     'bookmarksGroupColor', 'localBaseUrl', 'localModel',
@@ -370,6 +373,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   mergeIntoExistingCheckbox.checked = settings.mergeIntoExisting === true;
   sortTabsWithinGroupsByTitleCheckbox.checked = settings.sortTabsWithinGroupsByTitle === true;
   organizeOnClickCheckbox.checked = settings.organizeOnClick === true;
+  autoOrganizeEnabledCheckbox.checked = settings.autoOrganizeEnabled === true;
+  autoOrganizeDelayInput.value = settings.autoOrganizeDelay !== undefined ? Number(settings.autoOrganizeDelay) : 5;
   if (Array.isArray(settings.pinnedUrls)) {
     pinnedUrlsTextarea.value = settings.pinnedUrls.join('\n');
   }
@@ -926,6 +931,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   organizeOnClickCheckbox.addEventListener('change', () => {
     chrome.storage.local.set({ organizeOnClick: organizeOnClickCheckbox.checked });
+  });
+
+  autoOrganizeEnabledCheckbox.addEventListener('change', () => {
+    chrome.storage.local.set({ autoOrganizeEnabled: autoOrganizeEnabledCheckbox.checked });
+  });
+
+  autoOrganizeDelayInput.addEventListener('input', () => {
+    const value = Number(autoOrganizeDelayInput.value);
+    if (value >= 1 && value <= 60) {
+      chrome.storage.local.set({ autoOrganizeDelay: value });
+    }
   });
 
   pinnedUrlsTextarea.addEventListener('input', () => {

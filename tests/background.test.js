@@ -52,6 +52,7 @@ function loadBackground() {
     alarms: {
       create: async () => {},
       clear: async () => {},
+      getAll: async () => [],
       onAlarm: eventStub(),
     },
     commands: { onCommand: eventStub() },
@@ -1334,160 +1335,180 @@ test('partial GitHub errors preserve failed tabs from AI and managed groups from
   assert.equal(navigatedTab.groupId, -1);
 });
 
-// Auto-organize tests
-test('auto-organize is disabled by default', () => {
-  const { chrome } = loadBackground();
-  const settings = {};
-  chrome.storage.local.get = async () => settings;
-
-  // Auto-organize should be disabled by default (opt-in)
-  assert.equal(settings.autoOrganizeEnabled, undefined);
-});
-
-test('auto-organize skips when disabled via setting', async () => {
-  const { chrome } = loadBackground();
-  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: false, autoOrganizeDelay: 5 });
-  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
-
-  // Emit a tab creation event with auto-organize disabled
-  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
-
-  // Test completes without error - no organization triggered
-  assert.ok(true);
-});
-
-test('auto-organize listener is registered for tabs.onCreated', () => {
-  const { chrome } = loadBackground();
-
-  // Verify that the tabs.onCreated listener was registered
-  assert.ok(chrome.tabs.onCreated);
-  assert.ok(chrome.tabs.onCreated.addListener);
-});
-
-test('auto-organize storage change listener is registered', () => {
-  const { chrome } = loadBackground();
-
-  // Verify that the storage.onChanged listener was registered
-  assert.ok(chrome.storage.onChanged);
-  assert.ok(chrome.storage.onChanged.addListener);
-});
-
-test('auto-organize alarms listener is registered', () => {
-  const { chrome } = loadBackground();
-
-  // Verify that the alarms.onAlarm listener was registered
-  assert.ok(chrome.alarms.onAlarm);
-  assert.ok(chrome.alarms.onAlarm.addListener);
-});
-
-test('alarm-backed work is cancelled when auto-organize is disabled', async () => {
-  const { chrome } = loadBackground();
-  const alarmsCleared = [];
-  
-  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 60 });
-  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
-  chrome.alarms.create = () => {};
-  chrome.alarms.clear = (name) => { alarmsCleared.push(name); };
-
-  // Schedule auto-organize with 60s delay (uses alarms)
-  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
-  await new Promise(resolve => setTimeout(resolve, 10));
-
-  // Disable auto-organize
-  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: false });
-  await chrome.storage.onChanged.emit(
-    { autoOrganizeEnabled: { newValue: false, oldValue: true } },
-    'local'
-  );
-
-  // Verify alarm was cleared (P1 issue #1 fixed)
-  assert.ok(alarmsCleared.includes('autoOrganize_1'));
-});
-
-test('debouncing cancels timer immediately', async () => {
-  const { chrome } = loadBackground();
-  let clearedCount = 0;
-
-  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
-  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
-  chrome.alarms.clear = () => { clearedCount++; };
-
-  // First tab creation
-  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
-  await new Promise(resolve => setTimeout(resolve, 5));
-
-  // Second tab creation (should clear first immediately - P1 issue #2 fixed)
-  await chrome.tabs.onCreated.emit({ id: 2, windowId: 1 });
-  await new Promise(resolve => setTimeout(resolve, 5));
-
-  // Alarm should have been cleared at least once
-  assert.ok(clearedCount > 0);
-});
-
-test('30-second delay uses alarm path', async () => {
-  const { chrome } = loadBackground();
-  let alarmCreated = false;
-  let alarmName = null;
-
-  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 30 });
-  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
-  chrome.alarms.create = (name, options) => {
-    alarmCreated = true;
-    alarmName = name;
-    // P2 issue #4: >= ALARM_THRESHOLD_SECONDS (not just >)
-    assert.equal(options.delayInMinutes, 30 / 60);
+// Auto-organize tests drive the registered listeners with a controllable clock.
+function setupAutoOrganize(settings) {
+  const { chrome, context } = loadBackground();
+  const state = { settings: { ...settings }, timers: [], alarms: new Map(), cleared: [], runs: [] };
+  const windowTabs = new Map([
+    [1, [{ id: 11, windowId: 1, url: 'https://example.com/one' }]],
+    [2, [{ id: 21, windowId: 2, url: 'https://example.com/two' }]],
+  ]);
+  chrome.storage.local.get = async () => ({ ...state.settings });
+  chrome.tabs.query = async (query) => (windowTabs.get(query?.windowId) || []).map(tab => ({ ...tab }));
+  chrome.alarms.create = (name, options) => { state.alarms.set(name, options); };
+  chrome.alarms.clear = (name) => { state.cleared.push(name); state.alarms.delete(name); };
+  chrome.alarms.getAll = async () => Array.from(state.alarms.keys(), name => ({ name }));
+  context.setTimeout = (callback, ms) => {
+    const timer = { callback, ms, cleared: false };
+    state.timers.push(timer);
+    return timer;
   };
-
-  // Schedule with exactly 30 seconds
-  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
-  await new Promise(resolve => setTimeout(resolve, 10));
-
-  // Verify alarm was created (not setTimeout)
-  assert.ok(alarmCreated);
-  assert.equal(alarmName, 'autoOrganize_1');
-});
-
-test('per-window isolation with separate alarms', async () => {
-  const { chrome } = loadBackground();
-  const alarmsCreated = [];
-  
-  chrome.storage.local.get = async () => ({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
-  chrome.tabs.query = async (query) => {
-    if (query && query.windowId === 1) {
-      return [{ id: 1, url: 'https://example.com', windowId: 1 }];
-    } else if (query && query.windowId === 2) {
-      return [{ id: 2, url: 'https://example.com', windowId: 2 }];
+  context.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+  context.runOrganizeWithFeedback = async (windowId) => { state.runs.push(windowId); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const activeTimers = () => {
+    const autoTimers = new Set(vm.runInContext('Array.from(autoOrganizeTimers.values())', context));
+    return state.timers.filter(timer => !timer.cleared && autoTimers.has(timer));
+  };
+  const fireTimers = async () => {
+    for (const timer of activeTimers()) {
+      timer.cleared = true;
+      timer.callback();
     }
-    return [];
+    await flush();
   };
-  chrome.alarms.create = (name) => { alarmsCreated.push(name); };
+  return { chrome, context, state, windowTabs, flush, activeTimers, fireTimers };
+}
 
-  // Schedule for window 1
-  await chrome.tabs.onCreated.emit({ id: 1, windowId: 1 });
-  await new Promise(resolve => setTimeout(resolve, 5));
-
-  // Schedule for window 2
-  await chrome.tabs.onCreated.emit({ id: 2, windowId: 2 });
-  await new Promise(resolve => setTimeout(resolve, 5));
-
-  // Test passes if both windows got their own scheduling
-  assert.ok(true);
+test('auto-organize does nothing when the setting was never enabled', async () => {
+  const world = setupAutoOrganize({});
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  assert.equal(world.activeTimers().length, 0);
+  assert.equal(world.state.alarms.size, 0);
+  assert.deepEqual(world.state.runs, []);
 });
 
-test('alarm fires and checks settings at execution time', async () => {
-  const { chrome } = loadBackground();
-  let settingsChecked = false;
-  
-  chrome.storage.local.get = async () => {
-    settingsChecked = true;
-    return { autoOrganizeEnabled: false }; // Disabled when alarm fires
-  };
-  chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com', windowId: 1 }];
+test('disabling auto-organize cancels a queued timer before it runs', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  assert.equal(world.activeTimers().length, 1);
+  assert.equal(world.activeTimers()[0].ms, 5000);
 
-  // Fire alarm for window 1
-  await chrome.alarms.onAlarm.emit({ name: 'autoOrganize_1' });
-  await new Promise(resolve => setTimeout(resolve, 5));
+  world.state.settings.autoOrganizeEnabled = false;
+  await world.chrome.storage.onChanged.emit({ autoOrganizeEnabled: { newValue: false, oldValue: true } }, 'local');
+  await world.flush();
 
-  // Should have checked settings (P2 issue #3 - checks at execution time)
-  assert.ok(settingsChecked);
+  assert.equal(world.activeTimers().length, 0);
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('disable then re-enable cancels alarms, including ones from before a worker restart', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 60 });
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  assert.equal(world.state.alarms.get('autoOrganize_1')?.delayInMinutes, 1);
+  // Simulates an alarm persisted by Chrome from a previous service-worker lifetime.
+  world.state.alarms.set('autoOrganize_2', { delayInMinutes: 1 });
+
+  world.state.settings.autoOrganizeEnabled = false;
+  await world.chrome.storage.onChanged.emit({ autoOrganizeEnabled: { newValue: false, oldValue: true } }, 'local');
+  await world.flush();
+  assert.equal(world.state.alarms.size, 0);
+
+  world.state.settings.autoOrganizeEnabled = true;
+  await world.chrome.storage.onChanged.emit({ autoOrganizeEnabled: { newValue: true, oldValue: false } }, 'local');
+  await world.flush();
+  assert.equal(world.state.alarms.size, 0);
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('a tab opened near the deadline leaves exactly one pending run', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  const pendingReads = [];
+  world.chrome.storage.local.get = () => new Promise(resolve => pendingReads.push(resolve));
+
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.chrome.tabs.onCreated.emit({ id: 12, windowId: 1 });
+  // Resolve the settings reads out of order: the older scheduling must not install a timer.
+  pendingReads[1]({ ...world.state.settings });
+  pendingReads[0]({ ...world.state.settings });
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 1);
+  world.chrome.storage.local.get = async () => ({ ...world.state.settings });
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, [1]);
+});
+
+test('delays of 30 seconds or more use alarms; shorter delays use a timer', async () => {
+  const atThreshold = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 30 });
+  await atThreshold.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await atThreshold.flush();
+  assert.equal(atThreshold.state.alarms.get('autoOrganize_1')?.delayInMinutes, 0.5);
+  assert.equal(atThreshold.activeTimers().length, 0);
+
+  await atThreshold.chrome.alarms.onAlarm.emit({ name: 'autoOrganize_1' });
+  await atThreshold.flush();
+  assert.deepEqual(atThreshold.state.runs, [1]);
+
+  const belowThreshold = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 29 });
+  await belowThreshold.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await belowThreshold.flush();
+  assert.equal(belowThreshold.state.alarms.size, 0);
+  assert.equal(belowThreshold.activeTimers()[0].ms, 29000);
+});
+
+test('each window is scheduled and organized independently', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  const pendingReads = [];
+  world.chrome.storage.local.get = () => new Promise(resolve => pendingReads.push(resolve));
+
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.chrome.tabs.onCreated.emit({ id: 21, windowId: 2 });
+  for (const resolve of pendingReads) resolve({ ...world.state.settings });
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 2);
+  world.chrome.storage.local.get = async () => ({ ...world.state.settings });
+  await world.fireTimers();
+  assert.deepEqual([...world.state.runs].sort(), [1, 2]);
+});
+
+test('a loading first tab is scheduled and organized once its URL commits', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  world.windowTabs.set(3, [{ id: 31, windowId: 3, url: '', pendingUrl: 'https://example.com/new' }]);
+
+  await world.chrome.tabs.onCreated.emit({ id: 31, windowId: 3, pendingUrl: 'https://example.com/new' });
+  await world.flush();
+  assert.equal(world.activeTimers().length, 1);
+
+  world.windowTabs.set(3, [{ id: 31, windowId: 3, url: 'https://example.com/new' }]);
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, [3]);
+});
+
+test('a window without organizable tabs at the deadline is not organized', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  world.windowTabs.set(4, [{ id: 41, windowId: 4, url: 'chrome://newtab/' }]);
+
+  await world.chrome.tabs.onCreated.emit({ id: 41, windowId: 4 });
+  await world.flush();
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('a deadline during another organization is retried when that run finishes', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  const realRun = world.context.runOrganizeWithFeedback;
+  vm.runInContext('isOrganizing = true', world.context);
+
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, []);
+  assert.equal(vm.runInContext('autoOrganizePending.get(1)', world.context), true);
+
+  // The active organization finishes; its cleanup must reschedule the queued window.
+  vm.runInContext('isOrganizing = false', world.context);
+  delete world.context.runOrganizeWithFeedback;
+  await vm.runInContext('runOrganizeWithFeedback', world.context)(1);
+  world.context.runOrganizeWithFeedback = realRun;
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 1);
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, [1]);
 });

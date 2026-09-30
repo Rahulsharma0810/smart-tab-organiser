@@ -959,7 +959,8 @@ const autoOrganizeTimers = new Map(); // windowId -> timeout handle
 const autoOrganizeAlarms = new Set(); // windowIds using chrome.alarms
 const autoOrganizePending = new Map(); // windowId -> boolean (whether a run is queued)
 const ALARM_THRESHOLD_SECONDS = 30;
-let autoOrganizeGeneration = 0; // Invalidates stale async scheduling
+const autoOrganizeGenerations = new Map(); // windowId -> generation; invalidates stale async scheduling
+const AUTO_ORGANIZE_ALARM_PREFIX = 'autoOrganize_';
 
 // Schedule auto-organize for a specific window
 function scheduleAutoOrganize(windowId) {
@@ -972,8 +973,9 @@ function scheduleAutoOrganize(windowId) {
   chrome.alarms.clear(`autoOrganize_${windowId}`);
   autoOrganizeAlarms.delete(windowId);
 
-  // Increment generation to invalidate any in-flight scheduling for this window
-  const generation = ++autoOrganizeGeneration;
+  // Invalidate in-flight scheduling for this window only
+  const generation = (autoOrganizeGenerations.get(windowId) || 0) + 1;
+  autoOrganizeGenerations.set(windowId, generation);
 
   (async () => {
     try {
@@ -981,7 +983,7 @@ function scheduleAutoOrganize(windowId) {
       const settings = await chrome.storage.local.get(['autoOrganizeEnabled', 'autoOrganizeDelay']);
       
       // Check if this scheduling was invalidated by a newer call (P1 issue #2)
-      if (generation !== autoOrganizeGeneration) {
+      if (generation !== autoOrganizeGenerations.get(windowId)) {
         return;
       }
 
@@ -1083,14 +1085,24 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
       // Clear chrome.alarms for all tracked alarm windows
       for (const windowId of autoOrganizeAlarms) {
-        chrome.alarms.clear(`autoOrganize_${windowId}`);
+        chrome.alarms.clear(`${AUTO_ORGANIZE_ALARM_PREFIX}${windowId}`);
       }
       autoOrganizeAlarms.clear();
+      // Alarms outlive the service worker, so also clear ones scheduled before a restart.
+      Promise.resolve(chrome.alarms.getAll())
+        .then((alarms) => {
+          for (const alarm of alarms || []) {
+            if (alarm.name.startsWith(AUTO_ORGANIZE_ALARM_PREFIX)) chrome.alarms.clear(alarm.name);
+          }
+        })
+        .catch(() => {});
 
       autoOrganizePending.clear();
 
-      // Increment generation to invalidate any in-flight scheduling
-      autoOrganizeGeneration++;
+      // Invalidate any in-flight scheduling for every window
+      for (const [windowId, generation] of autoOrganizeGenerations) {
+        autoOrganizeGenerations.set(windowId, generation + 1);
+      }
     }
   }
 });
@@ -3517,39 +3529,9 @@ async function callChromeAI(tabs, customInstructions, existingGroups = null, min
       session.destroy();
     }
 
-    // When using responseConstraint, Chrome AI returns the JSON structure directly,
-    // not wrapped in text or markdown. Parse it as JSON.
-    let groups;
-    try {
-      console.log('[Smart Tab Organiser] Chrome AI raw response:', content);
-      console.log('[Smart Tab Organiser] Chrome AI response type:', typeof content);
-      groups = JSON.parse(content || '[]');
-      console.log('[Smart Tab Organiser] Chrome AI parsed groups:', groups);
-      
-      // Validate the groups array structure
-      if (!Array.isArray(groups)) {
-        console.error('[Smart Tab Organiser] Chrome AI response is not an array:', groups);
-        throw new Error('Response is not an array');
-      }
-      
-      // Check each group is valid (but allow empty array)
-      for (const group of groups) {
-        if (!group || typeof group !== 'object') {
-          console.error('[Smart Tab Organiser] Chrome AI invalid group object:', group);
-          throw new Error('Invalid group object');
-        }
-        if (typeof group.groupName !== 'string') {
-          console.error('[Smart Tab Organiser] Chrome AI invalid groupName:', group);
-          throw new Error('Invalid groupName');
-        }
-        if (!Array.isArray(group.tabIndices)) {
-          console.error('[Smart Tab Organiser] Chrome AI invalid tabIndices:', group);
-          throw new Error('Invalid tabIndices');
-        }
-      }
-    } catch (error) {
-      console.error('[Smart Tab Organiser] Chrome AI parsing error:', error);
-      console.error('[Smart Tab Organiser] Chrome AI content preview:', (content || '').slice(0, 500));
+    const groups = parseAiGroupsResponse((content || '').trim());
+    if (!groups) {
+      console.warn('[Smart Tab Organiser] Chrome AI: invalid format. Content preview:', (content || '').slice(0, 200));
       throw new Error('Invalid response format from Chrome built-in AI');
     }
 

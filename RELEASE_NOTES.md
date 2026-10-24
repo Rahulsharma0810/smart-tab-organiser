@@ -26,6 +26,14 @@
 
 - Chrome built-in AI no longer fails with "unexpected response" when Gemini Nano returns an empty batch or a group without tab numbers. The extension now drops only the empty groups.
 
+### Fixed
+
+- Merge mode no longer sends excluded tabs to AI as sample titles from a preserved group.
+- Refine mode reuses existing groups whose names exceed 20 characters; the limit now applies only to new group names.
+- Refine mode applies the minimum new-group size to the tabs that actually move, after stale tabs are dropped.
+- A hostname with a trailing dot, such as `youtube.com.`, now matches its configured excluded domain.
+- **Sort tabs within groups by title** no longer reorders a group that contains an excluded tab.
+
 ## 1.3.1 — August 20, 2026
 
 ### Changed

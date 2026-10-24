@@ -75,6 +75,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const organizeOnClickCheckbox = document.getElementById('organizeOnClick');
   const autoOrganizeEnabledCheckbox = document.getElementById('autoOrganizeEnabled');
   const autoOrganizeDelayInput = document.getElementById('autoOrganizeDelay');
+  const autoOrganizeDelayRow = document.getElementById('autoOrganizeDelayRow');
   const organizeTabsBtn = document.getElementById('organizeTabsBtn');
   const tidyPinnedBtn = document.getElementById('tidyPinnedBtn');
   const ungroupTabsBtn = document.getElementById('ungroupTabsBtn');
@@ -375,6 +376,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   organizeOnClickCheckbox.checked = settings.organizeOnClick === true;
   autoOrganizeEnabledCheckbox.checked = settings.autoOrganizeEnabled === true;
   autoOrganizeDelayInput.value = settings.autoOrganizeDelay !== undefined ? Number(settings.autoOrganizeDelay) : 5;
+  updateAutoOrganizeDelayVisibility();
   if (Array.isArray(settings.pinnedUrls)) {
     pinnedUrlsTextarea.value = settings.pinnedUrls.join('\n');
   }
@@ -928,6 +930,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     preserveGroupsMinTabsWarning.style.display = (!isNaN(n) && n > 3) ? '' : 'none';
   }
 
+  function updateAutoOrganizeDelayVisibility() {
+    const enabled = autoOrganizeEnabledCheckbox.checked;
+    autoOrganizeDelayRow.style.display = enabled ? '' : 'none';
+    autoOrganizeDelayInput.disabled = !enabled;
+  }
+
   preserveGroupsCheckbox.addEventListener('change', () => {
     chrome.storage.local.set({ preserveGroups: preserveGroupsCheckbox.checked });
     updatePreserveGroupsMinTabsVisibility();
@@ -965,12 +973,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   autoOrganizeEnabledCheckbox.addEventListener('change', () => {
     chrome.storage.local.set({ autoOrganizeEnabled: autoOrganizeEnabledCheckbox.checked });
+    updateAutoOrganizeDelayVisibility();
   });
 
   autoOrganizeDelayInput.addEventListener('input', () => {
     const value = Number(autoOrganizeDelayInput.value);
     if (value >= 1 && value <= 60) {
       chrome.storage.local.set({ autoOrganizeDelay: value });
+    }
+  });
+
+  autoOrganizeDelayInput.addEventListener('change', () => {
+    const delay = parseInt(autoOrganizeDelayInput.value, 10);
+    if (delay >= 1 && delay <= 60) {
+      chrome.storage.local.set({ autoOrganizeDelay: delay });
+    } else {
+      autoOrganizeDelayInput.value = settings.autoOrganizeDelay || 5;
     }
   });
 

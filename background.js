@@ -1279,6 +1279,7 @@ function scheduleBadgeUpdate() {
 }
 
 // Update badge when tabs are created, updated, or removed.
+// Auto-organize itself is scheduled per window by the tabs.onCreated listener above.
 chrome.tabs.onCreated.addListener(scheduleBadgeUpdate);
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {

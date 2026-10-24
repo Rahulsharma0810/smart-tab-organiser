@@ -159,6 +159,26 @@ test('AI URLs exclude credentials, query parameters, and fragments', () => {
   assert.equal(result, 'https://example.com/private/path');
 });
 
+test('AI response parsing keeps usable groups when another group has no indices', () => {
+  const { context } = loadBackground();
+  const response = JSON.stringify([
+    { groupName: 'Expensify GitHub Issues', tabIndices: [1, 2, 3, 4, 5, 12, 13] },
+    { groupName: 'Expensify Documentation & Planning', tabIndices: [6, 10, 14, 15] },
+    { groupName: 'Empty placeholder', tabIndices: [] },
+  ]);
+
+  const groups = context.parseAiGroupsResponse(response);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(groups)), [
+    { groupName: 'Expensify GitHub Issues', tabIndices: [1, 2, 3, 4, 5, 12, 13] },
+    { groupName: 'Expensify Documentation & Planning', tabIndices: [6, 10, 14, 15] },
+  ]);
+  assert.equal(
+    context.parseAiGroupsResponse('[{"groupName":"Empty placeholder","tabIndices":[]}]'),
+    null
+  );
+});
+
 test('the OpenAI request body receives only sanitized URLs', async () => {
   const { context } = loadBackground();
   let requestBody = null;
@@ -892,6 +912,39 @@ test('local model responses stream before they are parsed', async () => {
   assert.equal(requestBody.stream, true);
   assert.equal(groups[0].groupName, 'Local');
   assert.deepEqual(Array.from(groups[0].tabIndices), [1, 2]);
+});
+
+test('local model HTTP errors preserve status and local setup guidance', async () => {
+  const { context } = loadBackground();
+  context.fetch = async () => ({
+    ok: false,
+    status: 403,
+    text: async () => JSON.stringify({ error: { message: 'origin not allowed' } }),
+  });
+
+  let thrownError = null;
+  await assert.rejects(
+    context.callProvider(
+      'local',
+      { localBaseUrl: 'http://localhost:11434/v1', localModel: 'test-model' },
+      [{ title: 'One', url: 'https://example.com/one' }],
+      '',
+      null,
+      1
+    ),
+    (error) => {
+      thrownError = error;
+      return true;
+    }
+  );
+
+  assert.equal(thrownError.provider, 'local');
+  assert.equal(thrownError.status, 403);
+  assert.equal(thrownError.message, 'origin not allowed');
+  const classification = context.classifyAiError(thrownError);
+  assert.equal(classification.type, 'forbidden');
+  assert.match(classification.hint, /OLLAMA_ORIGINS="chrome-extension:\/\/\*"/);
+  assert.match(classification.hint, /enable CORS/);
 });
 
 test('local model retries share one total timeout', async () => {

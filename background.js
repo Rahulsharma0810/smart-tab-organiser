@@ -331,16 +331,26 @@ function normalizeTabIndices(indices) {
     .filter((idx) => Number.isInteger(idx) && idx > 0);
 }
 
-function isValidGroupsArray(value) {
-  if (!Array.isArray(value) || value.length === 0) return false;
-  return value.every(
-    (g) =>
-      g &&
-      typeof g === 'object' &&
-      typeof g.groupName === 'string' &&
-      Array.isArray(g.tabIndices) &&
-      normalizeTabIndices(g.tabIndices).length > 0
-  );
+function normalizeAiGroupsArray(value) {
+  if (!Array.isArray(value)) return [];
+
+  const groups = [];
+  for (const group of value) {
+    if (
+      !group ||
+      typeof group !== 'object' ||
+      typeof group.groupName !== 'string' ||
+      !group.groupName.trim() ||
+      !Array.isArray(group.tabIndices)
+    ) {
+      continue;
+    }
+
+    const tabIndices = normalizeTabIndices(group.tabIndices);
+    if (tabIndices.length === 0) continue;
+    groups.push({ groupName: group.groupName, tabIndices });
+  }
+  return groups;
 }
 
 /** Parse AI tab-grouping response; ignores non-JSON bracketed text like [domain.com]. */
@@ -383,11 +393,11 @@ function parseAiGroupsResponse(content) {
       if (!Array.isArray(parsed) && parsed && typeof parsed === 'object' && parsed.groupName) {
         parsed = [parsed];
       }
-      if (!isValidGroupsArray(parsed)) continue;
-      return parsed.map((g) => ({
-        groupName: g.groupName,
-        tabIndices: normalizeTabIndices(g.tabIndices),
-      }));
+      // A constrained model can still append an empty placeholder group. Keep the
+      // usable groups; tabs omitted with a discarded group are added to Misc later.
+      const groups = normalizeAiGroupsArray(parsed);
+      if (groups.length === 0) continue;
+      return groups;
     } catch (_) {
       // try next candidate
     }
@@ -401,7 +411,8 @@ const PROVIDER_LABELS = {
   claude: 'Claude',
   gemini: 'Gemini',
   'chrome-ai': 'Chrome built-in AI',
-  local: 'Loopback model server'
+  local: 'Loopback model server',
+  'custom-openai': 'OpenAI Compatible API Host'
 };
 // Providers that the extension contacts only on this computer.
 const LOCAL_PROVIDERS = ['chrome-ai', 'local'];
@@ -412,6 +423,106 @@ function isLocalProvider(provider) {
 
 function providerLabel(provider) {
   return PROVIDER_LABELS[provider] || provider;
+}
+
+function normalizeHostname(hostname) {
+  const value = String(hostname || '').trim().toLowerCase();
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function isLoopbackHostname(hostname) {
+  const value = normalizeHostname(hostname);
+  return value === 'localhost' || value === '127.0.0.1' || value === '::1';
+}
+
+function isStaticallyAllowedLoopbackHost(urlObj) {
+  if (!isLoopbackHostname(urlObj?.hostname)) return false;
+  const protocol = String(urlObj?.protocol || '').toLowerCase();
+  if (protocol !== 'http:') return false;
+  const host = String(urlObj?.hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1';
+}
+
+function customOpenAIOriginPattern(urlObj) {
+  return `${urlObj.protocol}//${urlObj.host}/*`;
+}
+
+async function ensureCustomOpenAIHostPermission(baseUrl, requestPermission = false) {
+  let urlObj;
+  try {
+    urlObj = new URL(baseUrl);
+  } catch {
+    throw new AiProviderError({
+      provider: 'custom-openai',
+      message: 'Enter a valid OpenAI-compatible base URL.'
+    });
+  }
+
+  if (isStaticallyAllowedLoopbackHost(urlObj)) {
+    return;
+  }
+
+  if (urlObj.protocol !== 'https:') {
+    throw new AiProviderError({
+      provider: 'custom-openai',
+      message: 'Remote OpenAI-compatible hosts must use HTTPS. Use HTTPS, or keep HTTP only for localhost/127.0.0.1.'
+    });
+  }
+
+  const originPattern = customOpenAIOriginPattern(urlObj);
+  const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+  if (hasPermission) {
+    return;
+  }
+
+  if (!requestPermission) {
+    throw new AiProviderError({
+      provider: 'custom-openai',
+      message: `Host permission missing for ${originPattern}. Open Options and click "Fetch models" for this host to grant access.`
+    });
+  }
+
+  const granted = await chrome.permissions.request({ origins: [originPattern] });
+  if (!granted) {
+    throw new Error(`Permission for ${originPattern} was not granted.`);
+  }
+}
+
+async function customOpenAIHostAccessStatus(rawBaseUrl) {
+  const baseRaw = (rawBaseUrl || '').trim();
+  if (!baseRaw) return { status: 'missing-base-url' };
+
+  let baseUrl;
+  try {
+    baseUrl = normalizeCustomOpenAIBaseUrl(baseRaw);
+  } catch {
+    return { status: 'invalid-base-url' };
+  }
+
+  let urlObj;
+  try {
+    urlObj = new URL(baseUrl);
+  } catch {
+    return { status: 'invalid-base-url' };
+  }
+
+  if (isStaticallyAllowedLoopbackHost(urlObj)) {
+    return { status: 'ready', baseUrl };
+  }
+
+  if (urlObj.protocol !== 'https:') {
+    return { status: 'insecure-http-url', baseUrl };
+  }
+
+  const originPattern = customOpenAIOriginPattern(urlObj);
+  const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+  if (!hasPermission) {
+    return { status: 'missing-host-permission', baseUrl, originPattern };
+  }
+  return { status: 'ready', baseUrl, originPattern };
 }
 
 class AiProviderError extends Error {
@@ -443,6 +554,17 @@ function extractProviderErrorMessage(body) {
   }
 }
 
+async function readErrorResponseBody(response) {
+  const text = await response.text().catch(() => '');
+  const bodyText = typeof text === 'string' ? text.trim() : '';
+  if (!bodyText) return null;
+  try {
+    return JSON.parse(bodyText);
+  } catch (_) {
+    return bodyText;
+  }
+}
+
 /** Translate any thrown error from a provider call into a user-friendly classification. */
 function classifyAiError(err) {
   const provider = err?.provider;
@@ -470,12 +592,15 @@ function classifyAiError(err) {
     };
   }
   if (status === 403 || /forbidden|permission denied|not allowed/.test(lower)) {
+    const hint = provider === 'local'
+      ? 'Allow Chrome extension requests in the local server. For Ollama, restart it with OLLAMA_ORIGINS="chrome-extension://*"; for LM Studio, enable CORS.'
+      : `Your ${label} key may not have access to the selected model.`;
     return {
       type: 'forbidden',
       provider,
       summary: `${label} denied the request (HTTP 403).`,
       detail: baseMsg,
-      hint: `Your ${label} key may not have access to the selected model.`,
+      hint,
     };
   }
   if (status === 429 || /rate limit|quota|too many requests/.test(lower)) {
@@ -512,6 +637,15 @@ function classifyAiError(err) {
       summary: `${label} network error.`,
       detail: baseMsg,
       hint: 'Check your internet connection or try a different provider.',
+    };
+  }
+  if (/timed out|timeout|aborted/.test(lower)) {
+    return {
+      type: 'timeout',
+      provider,
+      summary: `${label} timed out.`,
+      detail: baseMsg,
+      hint: 'Try again, reduce the number of tabs, or use a different provider.',
     };
   }
   if (/used all .* tokens on hidden reasoning|reasoning model .* produced no output/.test(lower)) {
@@ -574,7 +708,13 @@ function buildMultiProviderErrorMessage(failures) {
   if (!failures || failures.length === 0) return 'AI organization failed.';
   if (failures.length === 1) {
     const c = failures[0].classification;
-    return c.hint ? `${c.summary} ${c.hint}` : c.summary;
+    const rawDetail = typeof c.detail === 'string' ? c.detail.trim() : '';
+    const conciseDetail = rawDetail.length > 240 ? `${rawDetail.slice(0, 237)}...` : rawDetail;
+    const detail = c.type === 'unknown' && conciseDetail && conciseDetail !== c.summary
+      ? ` ${conciseDetail}`
+      : '';
+    const hint = c.hint ? ` ${c.hint}` : '';
+    return `${c.summary}${detail}${hint}`;
   }
   const lines = failures.map((f) => `• ${providerLabel(f.provider)}: ${shortFailureLabel(f.classification)}`);
   // For multi-failure notifications, keep it tight: list providers + one shared next step.
@@ -758,6 +898,15 @@ async function runOrganizeWithFeedback(windowId, options = {}) {
     chrome.action.setTitle({ title: 'Dedupe and tidy pinned tabs (left-click)' }).catch(() => {});
     chrome.contextMenus.update('dedupe-and-organize', { enabled: true }).catch(() => {});
     updateBadge(); // Restore duplicate-count badge
+
+    // Check if any windows have pending auto-organize runs
+    for (const [windowId, isPending] of autoOrganizePending) {
+      if (isPending) {
+        autoOrganizePending.delete(windowId);
+        // Retry the auto-organize for this window
+        scheduleAutoOrganize(windowId);
+      }
+    }
   }
 }
 
@@ -817,6 +966,159 @@ async function runDedupeAndTidyPinned(windowId, options = {}) {
     updateBadge();
   }
 }
+
+// Auto-organize: per-window timers and pending state
+const autoOrganizeTimers = new Map(); // windowId -> timeout handle
+const autoOrganizeAlarms = new Set(); // windowIds using chrome.alarms
+const autoOrganizePending = new Map(); // windowId -> boolean (whether a run is queued)
+const ALARM_THRESHOLD_SECONDS = 30;
+const autoOrganizeGenerations = new Map(); // windowId -> generation; invalidates stale async scheduling
+const AUTO_ORGANIZE_ALARM_PREFIX = 'autoOrganize_';
+
+// Schedule auto-organize for a specific window
+function scheduleAutoOrganize(windowId) {
+  // Cancel existing timer/alarm immediately before any async work (P1 issue #2)
+  const existingTimer = autoOrganizeTimers.get(windowId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    autoOrganizeTimers.delete(windowId);
+  }
+  chrome.alarms.clear(`autoOrganize_${windowId}`);
+  autoOrganizeAlarms.delete(windowId);
+
+  // Invalidate in-flight scheduling for this window only
+  const generation = (autoOrganizeGenerations.get(windowId) || 0) + 1;
+  autoOrganizeGenerations.set(windowId, generation);
+
+  (async () => {
+    try {
+      // Get current settings
+      const settings = await chrome.storage.local.get(['autoOrganizeEnabled', 'autoOrganizeDelay']);
+
+      // Check if this scheduling was invalidated by a newer call (P1 issue #2)
+      if (generation !== autoOrganizeGenerations.get(windowId)) {
+        return;
+      }
+
+      const enabled = settings.autoOrganizeEnabled === true;
+      const delaySeconds = Number(settings.autoOrganizeDelay) || 5;
+
+      // If disabled, clear any pending work for this window
+      if (!enabled) {
+        autoOrganizePending.delete(windowId);
+        return;
+      }
+
+      // Check at execution time instead of scheduling time (P2 issue #3)
+      // This handles tabs with pendingUrl that haven't committed yet
+
+      // For delays >=30s, use chrome.alarms API (service worker safe) (P2 issue #4)
+      if (delaySeconds >= ALARM_THRESHOLD_SECONDS) {
+        chrome.alarms.create(`autoOrganize_${windowId}`, {
+          delayInMinutes: delaySeconds / 60
+        });
+        autoOrganizeAlarms.add(windowId);
+      } else {
+        // For delays <30s, use setTimeout
+        const timer = setTimeout(() => {
+          executeAutoOrganize(windowId);
+          autoOrganizeTimers.delete(windowId);
+        }, delaySeconds * 1000);
+        autoOrganizeTimers.set(windowId, timer);
+      }
+    } catch (error) {
+      console.error('Error scheduling auto-organize:', error);
+    }
+  })();
+}
+
+// Execute auto-organize for a window
+async function executeAutoOrganize(windowId) {
+  try {
+    // Remove from alarms tracking set
+    autoOrganizeAlarms.delete(windowId);
+
+    // Re-check settings at execution time (user may have disabled it during delay)
+    const settings = await chrome.storage.local.get(['autoOrganizeEnabled']);
+    if (settings.autoOrganizeEnabled !== true) {
+      autoOrganizePending.delete(windowId);
+      return; // User disabled it while timer was pending
+    }
+
+    // Check if there are any organizable tabs at execution time (P2 issue #3)
+    // This handles tabs that had pendingUrl at creation time
+    const validTabs = await getOrganizableTabs(windowId);
+    if (validTabs.length === 0) {
+      autoOrganizePending.delete(windowId);
+      return; // No valid tabs to organize
+    }
+
+    // If already organizing, mark as pending and retry after current run
+    if (isOrganizing) {
+      autoOrganizePending.set(windowId, true);
+      return;
+    }
+
+    // Clear pending flag and run organization
+    autoOrganizePending.delete(windowId);
+    await runOrganizeWithFeedback(windowId, { silent: true });
+  } catch (error) {
+    console.error('Error executing auto-organize:', error);
+    autoOrganizePending.delete(windowId);
+  }
+}
+
+// Listen for chrome.alarms for delays >30s
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith('autoOrganize_')) {
+    const windowId = Number(alarm.name.replace('autoOrganize_', ''));
+    if (!isNaN(windowId)) {
+      executeAutoOrganize(windowId);
+    }
+  }
+});
+
+// Listen for new tabs and schedule auto-organize for that window
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.windowId) {
+    scheduleAutoOrganize(tab.windowId);
+  }
+});
+
+// Listen for storage changes to handle opt-out during pending timer
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.autoOrganizeEnabled) {
+    // If user disabled auto-organize, clear all pending timers and alarms (P1 issue #1)
+    if (changes.autoOrganizeEnabled.newValue !== true) {
+      // Clear setTimeout timers
+      for (const [windowId, timer] of autoOrganizeTimers) {
+        clearTimeout(timer);
+      }
+      autoOrganizeTimers.clear();
+
+      // Clear chrome.alarms for all tracked alarm windows
+      for (const windowId of autoOrganizeAlarms) {
+        chrome.alarms.clear(`${AUTO_ORGANIZE_ALARM_PREFIX}${windowId}`);
+      }
+      autoOrganizeAlarms.clear();
+      // Alarms outlive the service worker, so also clear ones scheduled before a restart.
+      Promise.resolve(chrome.alarms.getAll())
+        .then((alarms) => {
+          for (const alarm of alarms || []) {
+            if (alarm.name.startsWith(AUTO_ORGANIZE_ALARM_PREFIX)) chrome.alarms.clear(alarm.name);
+          }
+        })
+        .catch(() => {});
+
+      autoOrganizePending.clear();
+
+      // Invalidate any in-flight scheduling for every window
+      for (const [windowId, generation] of autoOrganizeGenerations) {
+        autoOrganizeGenerations.set(windowId, generation + 1);
+      }
+    }
+  }
+});
 
 // Handle extension icon left click - dedupe then tidy pinned tabs
 // (or the full dedupe + AI organize flow when "Organize tabs on click" is enabled)
@@ -2916,9 +3218,15 @@ async function callLocalModel(rawBaseUrl, model, tabs, customInstructions, exist
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
-        console.error('[Smart Tab Organiser] Local model error:', response.status, error);
-        throw new Error(error.error?.message || error.message || `Local model server error: ${response.status}`);
+        const errorBody = await readErrorResponseBody(response);
+        const message = extractProviderErrorMessage(errorBody) || `Local model server returned HTTP ${response.status}`;
+        console.error('[Smart Tab Organiser] Local model error:', response.status, message, errorBody);
+        throw new AiProviderError({
+          provider: 'local',
+          status: response.status,
+          message,
+          rawBody: errorBody,
+        });
       }
 
       content = await readOpenAiCompatibleChatResponse(response);
@@ -2943,6 +3251,168 @@ async function callLocalModel(rawBaseUrl, model, tabs, customInstructions, exist
   }
 
   throw lastError || new Error('Local model produced no usable response');
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible API host (any remote provider)
+// ---------------------------------------------------------------------------
+
+const CUSTOM_OPENAI_TIMEOUT_MS = 180000;
+
+/**
+ * Normalize a user-entered OpenAI-compatible host address into a base URL.
+ * Accepts "https://host", "host/v1", "https://host/v1/", and explicit API base paths.
+ * For origin-only input, defaults to "/v1".
+ */
+function normalizeCustomOpenAIBaseUrl(rawUrl) {
+  let url = (rawUrl || '').trim();
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('Enter a valid OpenAI-compatible base URL.');
+  }
+
+  const pathname = (parsed.pathname || '/').replace(/\/+$/, '');
+  const hasExplicitPath = pathname !== '' && pathname !== '/';
+  const lowerPath = pathname.toLowerCase();
+  const strippedPath = lowerPath.endsWith('/chat/completions')
+    ? pathname.slice(0, -'/chat/completions'.length)
+    : pathname;
+
+  parsed.pathname = hasExplicitPath
+    ? (strippedPath || '/')
+    : '/v1';
+
+  if (parsed.pathname.length > 1) {
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  }
+
+  return parsed.toString();
+}
+
+function buildCustomOpenAIEndpoint(baseUrl, endpointPath) {
+  const parsed = new URL(baseUrl);
+  const basePath = parsed.pathname.replace(/\/+$/, '');
+  parsed.pathname = `${basePath}${endpointPath}`;
+  return parsed.toString();
+}
+
+/** List the models an OpenAI-compatible host currently has available (for the Test connection button). */
+async function listCustomOpenAIModels(rawBaseUrl, apiKey, options = {}) {
+  const requestPermission = options.requestPermission === true;
+  const baseUrl = normalizeCustomOpenAIBaseUrl(rawBaseUrl);
+  if (!baseUrl) throw new Error('Enter a base URL for the OpenAI-compatible host first.');
+  await ensureCustomOpenAIHostPermission(baseUrl, requestPermission);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  try {
+    const response = await fetch(buildCustomOpenAIEndpoint(baseUrl, '/models'), { headers, signal: controller.signal });
+    if (!response.ok) {
+      const errorBody = await readErrorResponseBody(response);
+      const message = extractProviderErrorMessage(errorBody) || `OpenAI-compatible host returned ${response.status} for ${baseUrl}/models`;
+      throw new AiProviderError({ provider: 'custom-openai', status: response.status, message, rawBody: errorBody });
+    }
+    const data = await response.json();
+    const catalog = Array.isArray(data)
+      ? data
+      : (Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []));
+    const models = catalog
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object') return entry.id || entry.name || '';
+        return '';
+      })
+      .filter(Boolean)
+      .sort();
+    return { baseUrl, models };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Call any OpenAI-compatible host (OpenRouter, Together AI, a self-hosted server, …) to
+ * categorize tabs. Streaming makes response headers arrive before Chrome's 30-second
+ * service-worker fetch limit. The API key is optional — some hosts need none.
+ * Less reliable at emitting bare JSON, so one stricter retry is attempted.
+ */
+async function callCustomOpenAI(rawBaseUrl, apiKey, model, tabs, customInstructions, existingGroups = null, minGroupSize = 1) {
+  const baseUrl = normalizeCustomOpenAIBaseUrl(rawBaseUrl);
+  if (!baseUrl) throw new Error('No OpenAI-compatible base URL configured.');
+  if (!model?.trim()) throw new Error('No model name configured for the OpenAI-compatible host.');
+  await ensureCustomOpenAIHostPermission(baseUrl, false);
+  const basePrompt = buildOrganizePrompt(tabs, customInstructions, existingGroups, minGroupSize);
+  const retryReminder = '\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON array: start with [ and end with ]. No explanation, no markdown code fences.';
+
+  let lastError = null;
+  const deadline = Date.now() + CUSTOM_OPENAI_TIMEOUT_MS;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const prompt = attempt === 0 ? basePrompt : basePrompt + retryReminder;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`OpenAI-compatible host timed out after ${Math.round(CUSTOM_OPENAI_TIMEOUT_MS / 1000)}s.`);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remainingMs);
+
+    let content;
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+      const response = await fetch(buildCustomOpenAIEndpoint(baseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 5000,
+          temperature: 0.2,
+          stream: true
+        })
+      });
+      if (!response.ok) {
+        const errorBody = await readErrorResponseBody(response);
+        const message = extractProviderErrorMessage(errorBody) || `OpenAI-compatible host returned ${response.status}`;
+        console.error('[Smart Tab Organiser] OpenAI-compatible host error:', response.status, message, errorBody);
+        throw new AiProviderError({ provider: 'custom-openai', status: response.status, message, rawBody: errorBody });
+      }
+      content = await readOpenAiCompatibleChatResponse(response);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new AiProviderError({
+          provider: 'custom-openai',
+          message: `OpenAI-compatible host timed out after ${Math.round(CUSTOM_OPENAI_TIMEOUT_MS / 1000)}s.`
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!content) {
+      lastError = new AiProviderError({ provider: 'custom-openai', message: `No response from OpenAI-compatible host model "${model}"` });
+      continue;
+    }
+
+    const groups = parseAiGroupsResponse(content);
+    if (!groups) {
+      console.warn('[Smart Tab Organiser] OpenAI-compatible host: invalid format. Content preview:', content.slice(0, 200));
+      lastError = new AiProviderError({ provider: 'custom-openai', message: `Invalid response format from OpenAI-compatible host model "${model}"` });
+      continue;
+    }
+    return groups;
+  }
+
+  throw lastError || new AiProviderError({ provider: 'custom-openai', message: 'OpenAI-compatible host produced no usable response' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3032,6 +3502,13 @@ async function createChromeAiSession() {
   }
 }
 
+/**
+ * Marks a Chrome AI result that parsed successfully but contains no usable groups.
+ * organizeTabs() rejects empty provider results in general, so this lets a valid empty
+ * on-device response fall through to the remaining-tabs-to-Misc path instead.
+ */
+const CHROME_AI_EMPTY_RESULT = Symbol('chromeAiEmptyResult');
+
 /** Merge per-batch group lists into one, combining groups that share a name. */
 function mergeGroupBatches(batches) {
   const merged = new Map();
@@ -3050,6 +3527,28 @@ function mergeGroupBatches(batches) {
     }
   }
   return Array.from(merged.values());
+}
+
+/**
+ * Parse a Chrome AI batch response. With `responseConstraint`, Gemini Nano can return an
+ * empty array or groups without usable indices; the shared parser rejects the whole
+ * response in those cases, so keep the valid groups and drop only the empty ones.
+ */
+function parseChromeAiGroupsResponse(content) {
+  const text = (content || '').trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (_) {
+    return parseAiGroupsResponse(text);
+  }
+  if (!Array.isArray(parsed)) return parseAiGroupsResponse(text);
+  if (!parsed.every(group => group && typeof group === 'object' && typeof group.groupName === 'string')) {
+    return null;
+  }
+  return parsed
+    .map(group => ({ groupName: group.groupName, tabIndices: normalizeTabIndices(group.tabIndices) }))
+    .filter(group => group.groupName.trim() && group.tabIndices.length > 0);
 }
 
 /**
@@ -3078,7 +3577,7 @@ async function callChromeAI(tabs, customInstructions, existingGroups = null, min
       session.destroy();
     }
 
-    const groups = parseAiGroupsResponse((content || '').trim());
+    const groups = parseChromeAiGroupsResponse(content);
     if (!groups) {
       console.warn('[Smart Tab Organiser] Chrome AI: invalid format. Content preview:', (content || '').slice(0, 200));
       throw new Error('Invalid response format from Chrome built-in AI');
@@ -3093,7 +3592,14 @@ async function callChromeAI(tabs, customInstructions, existingGroups = null, min
     })));
   }
 
-  return mergeGroupBatches(results);
+  const merged = mergeGroupBatches(results);
+  // A response with no usable groups in any batch is valid, not a parse failure:
+  // every batch parsed and simply assigned nothing. Mark it so organizeTabs() lets
+  // those tabs take the existing remaining-tabs path into Misc.
+  if (merged.length === 0) {
+    Object.defineProperty(merged, CHROME_AI_EMPTY_RESULT, { value: true });
+  }
+  return merged;
 }
 // Organize tabs using AI
 function tabTitleForSort(tab) {
@@ -3174,6 +3680,14 @@ async function callProvider(provider, settings, tabs, instructions, existingGrou
       const baseUrl = settings.localBaseUrl?.trim() || DEFAULT_OLLAMA_BASE_URL;
       return await callLocalModel(baseUrl, model, promptTabs, instructions, existingGroupsForAI, minTabs);
     }
+    if (provider === 'custom-openai') {
+      const baseUrl = settings.customOpenaiBaseUrl?.trim();
+      if (!baseUrl) throw new AiProviderError({ provider, message: 'No OpenAI-compatible base URL configured' });
+      const model = settings.customOpenaiModel?.trim();
+      if (!model) throw new AiProviderError({ provider, message: 'No model name configured for the OpenAI-compatible host' });
+      const key = settings.customOpenaiKey?.trim();
+      return await callCustomOpenAI(baseUrl, key, model, promptTabs, instructions, existingGroupsForAI, minTabs);
+    }
     throw new AiProviderError({ provider, message: `Unknown AI provider: ${provider}` });
   } catch (err) {
     if (err instanceof AiProviderError) throw err;
@@ -3185,19 +3699,41 @@ function providerHasKey(provider, settings) {
   if (provider === 'openai') return !!settings.openaiKey?.trim();
   if (provider === 'claude') return !!settings.claudeKey?.trim();
   if (provider === 'gemini') return !!settings.geminiKey?.trim();
+  if (provider === 'custom-openai') return true; // key is optional
   return false;
 }
 
-/** True if the provider has everything it needs from settings to be worth attempting. */
-function providerIsConfigured(provider, settings) {
-  if (provider === 'chrome-ai') return true; // no key or name; availability is checked at call time
-  if (provider === 'local') return !!settings.localModel?.trim();
-  return providerHasKey(provider, settings);
+async function providerConfigurationStatus(provider, settings) {
+  if (provider === 'chrome-ai') return 'ready'; // Availability is checked when the provider runs.
+  if (provider === 'custom-openai') {
+    if (!settings.customOpenaiBaseUrl?.trim()) return 'missing-base-url';
+    if (!settings.customOpenaiModel?.trim()) return 'missing-model-name';
+    const hostStatus = await customOpenAIHostAccessStatus(settings.customOpenaiBaseUrl);
+    return hostStatus.status;
+  }
+  if (provider === 'local') {
+    return settings.localModel?.trim() ? 'ready' : 'no-model-name';
+  }
+  return providerHasKey(provider, settings) ? 'ready' : 'no-key';
+}
+
+function providerStatusFixMessage(provider, status) {
+  if (provider === 'custom-openai') {
+    if (status === 'missing-base-url') return 'Set the OpenAI Compatible base URL in Smart Tab Organiser settings.';
+    if (status === 'missing-model-name') return 'Set the OpenAI Compatible model name in Smart Tab Organiser settings.';
+    if (status === 'invalid-base-url') return 'Enter a valid OpenAI Compatible base URL in Smart Tab Organiser settings.';
+    if (status === 'insecure-http-url') return 'Use HTTPS for remote OpenAI Compatible hosts. HTTP is allowed only for localhost or 127.0.0.1.';
+    if (status === 'missing-host-permission') return 'Open Options and click "Fetch models" for this host to grant access.';
+  }
+  if (provider === 'local') {
+    return 'Set a model name in Smart Tab Organiser settings (for example, "llama3.1:8b").';
+  }
+  return 'Add an API key in Smart Tab Organiser settings, or configure another provider as fallback.';
 }
 
 // The user's preferred fallback order (Options → Fallback order). Unknown entries are
 // dropped and missing providers appended, so old or partial saved values stay valid.
-const DEFAULT_FALLBACK_ORDER = ['chrome-ai', 'local', 'openai', 'claude', 'gemini'];
+const DEFAULT_FALLBACK_ORDER = ['chrome-ai', 'local', 'openai', 'claude', 'gemini', 'custom-openai'];
 
 function normalizeFallbackOrder(saved) {
   const seen = new Set();
@@ -3228,7 +3764,9 @@ function normalizeFallbackOrder(saved) {
  *   Within the eligible set, the user's order wins.
  *
  * Statuses: 'primary' | 'ready' (in the chain) | 'disabled' | 'no-key' |
- * 'not-downloaded' | 'no-model-name' | 'cloud-opt-in-off' | 'not-after-cloud'.
+ * 'not-downloaded' | 'no-model-name' | 'cloud-opt-in-off' | 'not-after-cloud' |
+ * 'missing-base-url' | 'missing-model-name' | 'invalid-base-url' |
+ * 'insecure-http-url' | 'missing-host-permission'.
  * The options page renders these directly, so the UI can never drift from this logic.
  */
 async function describeProviderChain(settings) {
@@ -3245,25 +3783,52 @@ async function describeProviderChain(settings) {
   }
 
   const chain = [primary];
-  const entries = order.map((p) => {
-    if (p === primary) return { provider: p, status: 'primary' };
-    if (!fallbackEnabled) return { provider: p, status: 'disabled' };
+  const entries = [];
+  for (const p of order) {
+    if (p === primary) {
+      entries.push({ provider: p, status: 'primary' });
+      continue;
+    }
+    if (!fallbackEnabled) {
+      entries.push({ provider: p, status: 'disabled' });
+      continue;
+    }
     if (localPrimary) {
       if (p === 'local') {
-        if (!settings.localModel?.trim()) return { provider: p, status: 'no-model-name' };
+        if (!settings.localModel?.trim()) {
+          entries.push({ provider: p, status: 'no-model-name' });
+          continue;
+        }
       } else if (p === 'chrome-ai') {
-        if (!chromeAiReady) return { provider: p, status: 'not-downloaded' };
+        if (!chromeAiReady) {
+          entries.push({ provider: p, status: 'not-downloaded' });
+          continue;
+        }
       } else {
-        if (settings.aiAllowCloudFallback !== true) return { provider: p, status: 'cloud-opt-in-off' };
-        if (!providerHasKey(p, settings)) return { provider: p, status: 'no-key' };
+        if (settings.aiAllowCloudFallback !== true) {
+          entries.push({ provider: p, status: 'cloud-opt-in-off' });
+          continue;
+        }
+        const configStatus = await providerConfigurationStatus(p, settings);
+        if (configStatus !== 'ready') {
+          entries.push({ provider: p, status: configStatus });
+          continue;
+        }
       }
     } else {
-      if (isLocalProvider(p)) return { provider: p, status: 'not-after-cloud' };
-      if (!providerHasKey(p, settings)) return { provider: p, status: 'no-key' };
+      if (isLocalProvider(p)) {
+        entries.push({ provider: p, status: 'not-after-cloud' });
+        continue;
+      }
+      const configStatus = await providerConfigurationStatus(p, settings);
+      if (configStatus !== 'ready') {
+        entries.push({ provider: p, status: configStatus });
+        continue;
+      }
     }
     chain.push(p);
-    return { provider: p, status: 'ready' };
-  });
+    entries.push({ provider: p, status: 'ready' });
+  }
 
   return { primary, order, chain, entries, fallbackEnabled, localPrimary };
 }
@@ -3271,6 +3836,15 @@ async function describeProviderChain(settings) {
 /** Ordered list of providers to attempt: primary first, then eligible fallbacks in the user's order. */
 async function buildProviderChain(settings) {
   return (await describeProviderChain(settings)).chain;
+}
+
+async function computeProviderStatuses(providerChain, settings) {
+  return Promise.all(
+    providerChain.map(async (provider) => ({
+      provider,
+      status: await providerConfigurationStatus(provider, settings),
+    }))
+  );
 }
 
 async function organizeTabs(
@@ -3288,7 +3862,8 @@ async function organizeTabs(
     const settings = await chrome.storage.local.get([
       'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled', 'aiAllowCloudFallback',
       'aiFallbackOrder', 'openaiModel', 'claudeModel', 'geminiModel', 'customInstructionsOptions',
-      'localBaseUrl', 'localModel', 'closedIssueGroupEnabled', 'githubLabelGroupsEnabled',
+      'localBaseUrl', 'localModel', 'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel',
+      'closedIssueGroupEnabled', 'githubLabelGroupsEnabled',
       'githubLabelGroupNames', 'githubManagedLabelGroupNamesByWindow'
     ]);
 
@@ -3306,13 +3881,28 @@ async function organizeTabs(
 
     // Validate that at least one provider in the chain is configured.
     // Local providers need no provider key: Chrome AI needs nothing; loopback needs a model name.
+    // This preflight runs before any tab-group mutation.
     const providerChain = await buildProviderChain(settings);
-    const usableChain = providerChain.filter((p) => providerIsConfigured(p, settings));
+    let providerStatuses = await computeProviderStatuses(providerChain, settings);
+    const primary = providerChain[0] || 'openai';
+    const primaryStatus = providerStatuses.find((entry) => entry.provider === primary)?.status || 'no-key';
+
+    if (primary === 'custom-openai' && primaryStatus === 'missing-host-permission') {
+      const baseUrl = normalizeCustomOpenAIBaseUrl(settings.customOpenaiBaseUrl || '');
+      try {
+        await ensureCustomOpenAIHostPermission(baseUrl, true);
+      } catch (_) {
+        // Keep status from a fresh check below so the error remains specific.
+      }
+      providerStatuses = await computeProviderStatuses(providerChain, settings);
+    }
+
+    const usableChain = providerStatuses
+      .filter((entry) => entry.status === 'ready')
+      .map((entry) => entry.provider);
     if (usableChain.length === 0) {
-      const primary = providerChain[0] || 'openai';
-      const fix = primary === 'local'
-        ? 'Set a model name in Smart Tab Organiser settings (e.g. "llama3.1:8b").'
-        : 'Add a key in Smart Tab Organiser settings, or configure another provider as fallback.';
+      const currentPrimaryStatus = providerStatuses.find((entry) => entry.provider === primary)?.status || 'no-key';
+      const fix = providerStatusFixMessage(primary, currentPrimaryStatus);
       return {
         success: false,
         error: `${providerLabel(primary)} is not configured. ${fix}`,
@@ -3438,7 +4028,12 @@ async function organizeTabs(
     for (const provider of usableChain) {
       try {
         const result = await callProvider(provider, settings, tabsForAI, instructions, existingGroupsForAI, minTabs);
-        if (!Array.isArray(result) || result.length === 0) {
+        // Chrome AI may legitimately return no groups (an empty array, or only empty groups)
+        // when Gemini Nano finds nothing worth grouping. callChromeAI() marks that valid
+        // empty result; a genuine parse failure still throws there. Every tab it did not
+        // assign falls through to the remaining-tab path below and is placed in Misc.
+        const validEmptyChromeAiResult = Array.isArray(result) && result[CHROME_AI_EMPTY_RESULT] === true;
+        if (!Array.isArray(result) || (result.length === 0 && !validEmptyChromeAiResult)) {
           throw new AiProviderError({ provider, message: `Invalid response from ${providerLabel(provider)}: expected array of groups` });
         }
         groups = result;
@@ -3777,39 +4372,58 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   
   if (request.action === 'organizeTabs') {
     (async () => {
-      const targetWindowId = await resolveTargetWindowId(request.windowId);
-      const githubPrSync = await syncEnabledGitHubTabGroups(targetWindowId, {
-        includePr: true,
-        includeIssues: false,
-      }).catch(() => ({ stopRemainingSyncs: false }));
-      const dedupeSettings = await chrome.storage.local.get([
-        'ignoreQuery', 'ignoreHash', 'reloadTabs', 'preserveGroupsMinTabs'
-      ]);
-      const dedupeResult = await closeDuplicates(
-        dedupeSettings.ignoreQuery !== false,
-        dedupeSettings.ignoreHash !== false,
-        dedupeSettings.reloadTabs === true,
-        targetWindowId
-      );
-      if (!dedupeResult.success) return dedupeResult;
-      const githubIssueSync = await syncEnabledGitHubTabGroups(targetWindowId, {
-        includePr: false,
-        includeIssues: true,
-        blockedByEarlierSync: githubPrSync.stopRemainingSyncs,
-      }).catch(() => ({ preservedTabIds: [] }));
+      // Check for concurrent organization
+      if (isOrganizing) {
+        return { success: false, error: 'Organization already in progress' };
+      }
+      isOrganizing = true;
 
-      // A caller can omit preserveGroupsMinTabs. Use the saved value instead of 1.
-      const minTabsRaw = request.preserveGroupsMinTabs ?? dedupeSettings.preserveGroupsMinTabs;
-      const result = await organizeTabs(
-        request.preserveGroups,
-        request.mergeIntoExisting || false,
-        request.customInstructions,
-        parseMinTabs(minTabsRaw),
-        targetWindowId,
-        githubIssueSync.preservedTabIds
-      );
-      await reconcileManagedTabGroupsSafely(targetWindowId);
-      return result;
+      try {
+        const targetWindowId = await resolveTargetWindowId(request.windowId);
+        const githubPrSync = await syncEnabledGitHubTabGroups(targetWindowId, {
+          includePr: true,
+          includeIssues: false,
+        }).catch(() => ({ stopRemainingSyncs: false }));
+        const dedupeSettings = await chrome.storage.local.get([
+          'ignoreQuery', 'ignoreHash', 'reloadTabs', 'preserveGroupsMinTabs'
+        ]);
+        const dedupeResult = await closeDuplicates(
+          dedupeSettings.ignoreQuery !== false,
+          dedupeSettings.ignoreHash !== false,
+          dedupeSettings.reloadTabs === true,
+          targetWindowId
+        );
+        if (!dedupeResult.success) return dedupeResult;
+        const githubIssueSync = await syncEnabledGitHubTabGroups(targetWindowId, {
+          includePr: false,
+          includeIssues: true,
+          blockedByEarlierSync: githubPrSync.stopRemainingSyncs,
+        }).catch(() => ({ preservedTabIds: [] }));
+
+        // A caller can omit preserveGroupsMinTabs. Use the saved value instead of 1.
+        const minTabsRaw = request.preserveGroupsMinTabs ?? dedupeSettings.preserveGroupsMinTabs;
+        const result = await organizeTabs(
+          request.preserveGroups,
+          request.mergeIntoExisting || false,
+          request.customInstructions,
+          parseMinTabs(minTabsRaw),
+          targetWindowId,
+          githubIssueSync.preservedTabIds
+        );
+        await reconcileManagedTabGroupsSafely(targetWindowId);
+        return result;
+      } finally {
+        isOrganizing = false;
+        // Refresh badge after organization completes (P3 issue #5)
+        updateBadge();
+        // Check for pending auto-organize runs
+        for (const [windowId, isPending] of autoOrganizePending) {
+          if (isPending) {
+            autoOrganizePending.delete(windowId);
+            scheduleAutoOrganize(windowId);
+          }
+        }
+      }
     })()
       .then(result => sendResponse(result))
       .catch(error => sendResponse({ success: false, error: error.message }));
@@ -3887,13 +4501,21 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'testCustomOpenAI') {
+    listCustomOpenAIModels(request.baseUrl, request.apiKey || '', { requestPermission: true })
+      .then(result => sendResponse({ success: true, ...result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   // The options page renders the fallback order and hint from this, so what the user
   // sees is exactly the chain organizeTabs would run — one source of truth.
   if (request.action === 'describeProviderChain') {
     (async () => {
       const settings = await chrome.storage.local.get([
         'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled',
-        'aiAllowCloudFallback', 'aiFallbackOrder', 'localModel'
+        'aiAllowCloudFallback', 'aiFallbackOrder', 'localModel',
+        'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel'
       ]);
       return describeProviderChain(settings);
     })()

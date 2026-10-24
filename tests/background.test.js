@@ -49,6 +49,12 @@ function loadBackground() {
       setBadgeText: async () => {},
       setTitle: async () => {},
     },
+    alarms: {
+      create: async () => {},
+      clear: async () => {},
+      getAll: async () => [],
+      onAlarm: eventStub(),
+    },
     commands: { onCommand: eventStub() },
     contextMenus: {
       onClicked: eventStub(),
@@ -59,6 +65,10 @@ function loadBackground() {
     notifications: {
       clear: async () => {},
       create: async () => {},
+    },
+    permissions: {
+      contains: async () => true,
+      request: async () => true,
     },
     runtime: {
       getURL: (relativePath) => `chrome-extension://test/${relativePath}`,
@@ -71,6 +81,7 @@ function loadBackground() {
         get: async () => ({}),
         set: async () => {},
       },
+      onChanged: eventStub(),
     },
     tabGroups: {
       move: async () => {},
@@ -137,6 +148,26 @@ test('AI URLs exclude credentials, query parameters, and fragments', () => {
   );
 
   assert.equal(result, 'https://example.com/private/path');
+});
+
+test('AI response parsing keeps usable groups when another group has no indices', () => {
+  const { context } = loadBackground();
+  const response = JSON.stringify([
+    { groupName: 'Expensify GitHub Issues', tabIndices: [1, 2, 3, 4, 5, 12, 13] },
+    { groupName: 'Expensify Documentation & Planning', tabIndices: [6, 10, 14, 15] },
+    { groupName: 'Empty placeholder', tabIndices: [] },
+  ]);
+
+  const groups = context.parseAiGroupsResponse(response);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(groups)), [
+    { groupName: 'Expensify GitHub Issues', tabIndices: [1, 2, 3, 4, 5, 12, 13] },
+    { groupName: 'Expensify Documentation & Planning', tabIndices: [6, 10, 14, 15] },
+  ]);
+  assert.equal(
+    context.parseAiGroupsResponse('[{"groupName":"Empty placeholder","tabIndices":[]}]'),
+    null
+  );
 });
 
 test('the OpenAI request body receives only sanitized URLs', async () => {
@@ -253,6 +284,268 @@ test('provider fallback is disabled until the user enables it', async () => {
   assert.deepEqual(Array.from(description.chain), ['openai']);
 });
 
+test('Chrome built-in AI remains configured without an API key', async () => {
+  const { context } = loadBackground();
+
+  assert.equal(await context.providerConfigurationStatus('chrome-ai', {}), 'ready');
+});
+
+test('custom OpenAI optional host access is restricted to HTTPS', () => {
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '..', 'manifest.json'),
+    'utf8'
+  ));
+
+  assert.deepEqual(manifest.optional_host_permissions, ['https://*/*']);
+});
+
+test('custom OpenAI host normalization preserves explicit paths and defaults origin-only input to /v1', () => {
+  const { context } = loadBackground();
+
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('api.example.com'),
+    'https://api.example.com/v1'
+  );
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://gateway.example.com/compat'),
+    'https://gateway.example.com/compat'
+  );
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://gateway.example.com/chat/completions?tenant=abc'),
+    'https://gateway.example.com/?tenant=abc'
+  );
+});
+
+test('custom OpenAI model listing accepts top-level arrays and string entries', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => true;
+
+  context.fetch = async (url) => {
+    assert.equal(url, 'https://api.example.com/v1/models');
+    return {
+      ok: true,
+      json: async () => ([
+        'model-b',
+        { id: 'model-a' },
+        { name: 'model-c' },
+      ]),
+    };
+  };
+
+  const result = await context.listCustomOpenAIModels('https://api.example.com', '');
+  assert.equal(result.baseUrl, 'https://api.example.com/v1');
+  assert.deepEqual(Array.from(result.models), ['model-a', 'model-b', 'model-c']);
+});
+
+test('custom OpenAI calls support optional authorization and JSON or SSE responses', async () => {
+  const { context } = loadBackground();
+  const tabs = [{ title: 'One', url: 'https://example.com/one' }];
+  const requests = [];
+
+  context.fetch = async (url, init) => {
+    requests.push({ url, init });
+    if (requests.length === 1) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          choices: [{ message: { content: '[{"groupName":"JSON","tabIndices":[1]}]' } }],
+        }),
+      };
+    }
+    return makeSseResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: '[{"groupName":"SSE","tabIndices":[1]}]' } }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ]);
+  };
+
+  const jsonGroups = await context.callCustomOpenAI(
+    'https://api.example.com/v1',
+    '',
+    'model-a',
+    tabs,
+    '',
+    null,
+    1
+  );
+  const sseGroups = await context.callCustomOpenAI(
+    'https://api.example.com/v1',
+    'custom-key',
+    'model-a',
+    tabs,
+    '',
+    null,
+    1
+  );
+
+  assert.equal(requests[0].url, 'https://api.example.com/v1/chat/completions');
+  assert.equal(requests[0].init.headers.Authorization, undefined);
+  assert.equal(JSON.parse(requests[0].init.body).stream, true);
+  assert.equal(jsonGroups[0].groupName, 'JSON');
+  assert.equal(requests[1].init.headers.Authorization, 'Bearer custom-key');
+  assert.equal(sseGroups[0].groupName, 'SSE');
+});
+
+test('custom OpenAI HTTP errors retain status and actionable provider detail', async () => {
+  const { context } = loadBackground();
+  context.fetch = async () => ({
+    ok: false,
+    status: 422,
+    text: async () => JSON.stringify({ error: { message: 'unsupported max_tokens' } }),
+  });
+
+  let thrownError = null;
+  await assert.rejects(
+    context.callCustomOpenAI(
+      'https://api.example.com/v1',
+      'custom-key',
+      'model-a',
+      [{ title: 'One', url: 'https://example.com/one' }],
+      '',
+      null,
+      1
+    ),
+    (error) => {
+      thrownError = error;
+      return error.status === 422 && error.message === 'unsupported max_tokens';
+    }
+  );
+
+  const classification = context.classifyAiError(thrownError);
+  const message = context.buildMultiProviderErrorMessage([
+    { provider: 'custom-openai', classification },
+  ]);
+  assert.equal(classification.type, 'unknown');
+  assert.match(message, /HTTP 422/);
+  assert.match(message, /unsupported max_tokens/);
+});
+
+test('custom OpenAI retries share one total timeout', async () => {
+  const { context } = loadBackground();
+  const clockValues = [0, 0, 180001];
+  let fetchCount = 0;
+  context.Date = { now: () => clockValues.shift() ?? 180001 };
+  context.fetch = async () => {
+    fetchCount++;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ choices: [{ message: { content: 'not valid grouping JSON' } }] }),
+    };
+  };
+
+  let thrownError = null;
+  await assert.rejects(
+    context.callProvider(
+      'custom-openai',
+      {
+        customOpenaiBaseUrl: 'https://api.example.com/v1',
+        customOpenaiModel: 'model-a',
+      },
+      [{ title: 'One', url: 'https://example.com/one' }],
+      '',
+      null,
+      1
+    ),
+    (error) => {
+      thrownError = error;
+      return /timed out after 180s/.test(error.message);
+    }
+  );
+
+  assert.equal(fetchCount, 1);
+  assert.equal(context.classifyAiError(thrownError).type, 'timeout');
+});
+
+test('custom OpenAI chain status reports missing model separately from missing key', async () => {
+  const { context } = loadBackground();
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'openai',
+    openaiKey: 'openai-key',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['custom-openai', 'claude'],
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+  });
+
+  const customEntry = description.entries.find((entry) => entry.provider === 'custom-openai');
+  assert.equal(customEntry.status, 'missing-model-name');
+});
+
+test('custom OpenAI chain marks missing host permission as not ready', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => false;
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'openai',
+    openaiKey: 'openai-key',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['custom-openai', 'claude'],
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'test-model',
+    claudeKey: 'claude-key',
+  });
+
+  const customEntry = description.entries.find((entry) => entry.provider === 'custom-openai');
+  assert.equal(customEntry.status, 'missing-host-permission');
+  assert.deepEqual(Array.from(description.chain), ['openai', 'claude']);
+});
+
+test('organizeTabs requests custom host permission before any grouping mutation', async () => {
+  const { chrome, context } = loadBackground();
+  const tabs = [
+    { id: 1, index: 0, pinned: false, groupId: -1, windowId: 1, title: 'One', url: 'https://example.com/one' },
+    { id: 2, index: 1, pinned: false, groupId: -1, windowId: 1, title: 'Two', url: 'https://example.com/two' },
+  ];
+  const callOrder = [];
+
+  chrome.storage.local.get = async () => ({
+    aiProvider: 'custom-openai',
+    aiFallbackEnabled: false,
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'model-a',
+    customOpenaiKey: 'key',
+  });
+  chrome.permissions.contains = async () => {
+    callOrder.push('contains');
+    return false;
+  };
+  chrome.permissions.request = async () => {
+    callOrder.push('request');
+    return false;
+  };
+  chrome.tabs.query = async (queryInfo = {}) => {
+    if (Object.prototype.hasOwnProperty.call(queryInfo, 'groupId')) return [];
+    return tabs.map((tab) => ({ ...tab }));
+  };
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.ungroup = async () => {
+    callOrder.push('ungroup');
+  };
+  context.fetch = async () => {
+    throw new Error('fetch should not run when permission is denied');
+  };
+
+  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+  assert.equal(result.success, false);
+  assert.match(result.error, /OpenAI Compatible API Host is not configured\./);
+  assert.match(result.error, /Fetch models/);
+  assert.equal(callOrder.includes('ungroup'), false);
+  assert.equal(callOrder.includes('request'), true);
+  assert.equal(callOrder.at(-1), 'contains');
+});
+
+test('custom OpenAI base URL keeps query values with trailing slashes', () => {
+  const { context } = loadBackground();
+
+  assert.equal(
+    context.normalizeCustomOpenAIBaseUrl('https://api.example.com/v1?sig=abc/'),
+    'https://api.example.com/v1?sig=abc/'
+  );
+});
+
 test('local model responses stream before they are parsed', async () => {
   const { context } = loadBackground();
   const encoder = new TextEncoder();
@@ -294,6 +587,39 @@ test('local model responses stream before they are parsed', async () => {
   assert.equal(requestBody.stream, true);
   assert.equal(groups[0].groupName, 'Local');
   assert.deepEqual(Array.from(groups[0].tabIndices), [1, 2]);
+});
+
+test('local model HTTP errors preserve status and local setup guidance', async () => {
+  const { context } = loadBackground();
+  context.fetch = async () => ({
+    ok: false,
+    status: 403,
+    text: async () => JSON.stringify({ error: { message: 'origin not allowed' } }),
+  });
+
+  let thrownError = null;
+  await assert.rejects(
+    context.callProvider(
+      'local',
+      { localBaseUrl: 'http://localhost:11434/v1', localModel: 'test-model' },
+      [{ title: 'One', url: 'https://example.com/one' }],
+      '',
+      null,
+      1
+    ),
+    (error) => {
+      thrownError = error;
+      return true;
+    }
+  );
+
+  assert.equal(thrownError.provider, 'local');
+  assert.equal(thrownError.status, 403);
+  assert.equal(thrownError.message, 'origin not allowed');
+  const classification = context.classifyAiError(thrownError);
+  assert.equal(classification.type, 'forbidden');
+  assert.match(classification.hint, /OLLAMA_ORIGINS="chrome-extension:\/\/\*"/);
+  assert.match(classification.hint, /enable CORS/);
 });
 
 test('local model retries share one total timeout', async () => {
@@ -1060,4 +1386,318 @@ test('partial GitHub errors preserve failed tabs from AI and managed groups from
   );
   assert.equal(removedFromManagedGroup, true);
   assert.equal(navigatedTab.groupId, -1);
+});
+
+// Auto-organize tests drive the registered listeners with a controllable clock.
+function setupAutoOrganize(settings) {
+  const { chrome, context } = loadBackground();
+  const state = { settings: { ...settings }, timers: [], alarms: new Map(), cleared: [], runs: [] };
+  const windowTabs = new Map([
+    [1, [{ id: 11, windowId: 1, url: 'https://example.com/one' }]],
+    [2, [{ id: 21, windowId: 2, url: 'https://example.com/two' }]],
+  ]);
+  chrome.storage.local.get = async () => ({ ...state.settings });
+  chrome.tabs.query = async (query) => (windowTabs.get(query?.windowId) || []).map(tab => ({ ...tab }));
+  chrome.alarms.create = (name, options) => { state.alarms.set(name, options); };
+  chrome.alarms.clear = (name) => { state.cleared.push(name); state.alarms.delete(name); };
+  chrome.alarms.getAll = async () => Array.from(state.alarms.keys(), name => ({ name }));
+  context.setTimeout = (callback, ms) => {
+    const timer = { callback, ms, cleared: false };
+    state.timers.push(timer);
+    return timer;
+  };
+  context.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+  context.runOrganizeWithFeedback = async (windowId) => { state.runs.push(windowId); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const activeTimers = () => {
+    const autoTimers = new Set(vm.runInContext('Array.from(autoOrganizeTimers.values())', context));
+    return state.timers.filter(timer => !timer.cleared && autoTimers.has(timer));
+  };
+  const fireTimers = async () => {
+    for (const timer of activeTimers()) {
+      timer.cleared = true;
+      timer.callback();
+    }
+    await flush();
+  };
+  return { chrome, context, state, windowTabs, flush, activeTimers, fireTimers };
+}
+
+test('auto-organize does nothing when the setting was never enabled', async () => {
+  const world = setupAutoOrganize({});
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  assert.equal(world.activeTimers().length, 0);
+  assert.equal(world.state.alarms.size, 0);
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('disabling auto-organize cancels a queued timer before it runs', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  assert.equal(world.activeTimers().length, 1);
+  assert.equal(world.activeTimers()[0].ms, 5000);
+
+  world.state.settings.autoOrganizeEnabled = false;
+  await world.chrome.storage.onChanged.emit({ autoOrganizeEnabled: { newValue: false, oldValue: true } }, 'local');
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 0);
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('disable then re-enable cancels alarms, including ones from before a worker restart', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 60 });
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  assert.equal(world.state.alarms.get('autoOrganize_1')?.delayInMinutes, 1);
+  // Simulates an alarm persisted by Chrome from a previous service-worker lifetime.
+  world.state.alarms.set('autoOrganize_2', { delayInMinutes: 1 });
+
+  world.state.settings.autoOrganizeEnabled = false;
+  await world.chrome.storage.onChanged.emit({ autoOrganizeEnabled: { newValue: false, oldValue: true } }, 'local');
+  await world.flush();
+  assert.equal(world.state.alarms.size, 0);
+
+  world.state.settings.autoOrganizeEnabled = true;
+  await world.chrome.storage.onChanged.emit({ autoOrganizeEnabled: { newValue: true, oldValue: false } }, 'local');
+  await world.flush();
+  assert.equal(world.state.alarms.size, 0);
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('a tab opened near the deadline leaves exactly one pending run', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  const pendingReads = [];
+  world.chrome.storage.local.get = () => new Promise(resolve => pendingReads.push(resolve));
+
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.chrome.tabs.onCreated.emit({ id: 12, windowId: 1 });
+  // Resolve the settings reads out of order: the older scheduling must not install a timer.
+  pendingReads[1]({ ...world.state.settings });
+  pendingReads[0]({ ...world.state.settings });
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 1);
+  world.chrome.storage.local.get = async () => ({ ...world.state.settings });
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, [1]);
+});
+
+test('delays of 30 seconds or more use alarms; shorter delays use a timer', async () => {
+  const atThreshold = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 30 });
+  await atThreshold.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await atThreshold.flush();
+  assert.equal(atThreshold.state.alarms.get('autoOrganize_1')?.delayInMinutes, 0.5);
+  assert.equal(atThreshold.activeTimers().length, 0);
+
+  await atThreshold.chrome.alarms.onAlarm.emit({ name: 'autoOrganize_1' });
+  await atThreshold.flush();
+  assert.deepEqual(atThreshold.state.runs, [1]);
+
+  const belowThreshold = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 29 });
+  await belowThreshold.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await belowThreshold.flush();
+  assert.equal(belowThreshold.state.alarms.size, 0);
+  assert.equal(belowThreshold.activeTimers()[0].ms, 29000);
+});
+
+test('each window is scheduled and organized independently', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  const pendingReads = [];
+  world.chrome.storage.local.get = () => new Promise(resolve => pendingReads.push(resolve));
+
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.chrome.tabs.onCreated.emit({ id: 21, windowId: 2 });
+  for (const resolve of pendingReads) resolve({ ...world.state.settings });
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 2);
+  world.chrome.storage.local.get = async () => ({ ...world.state.settings });
+  await world.fireTimers();
+  assert.deepEqual([...world.state.runs].sort(), [1, 2]);
+});
+
+test('a loading first tab is scheduled and organized once its URL commits', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  world.windowTabs.set(3, [{ id: 31, windowId: 3, url: '', pendingUrl: 'https://example.com/new' }]);
+
+  await world.chrome.tabs.onCreated.emit({ id: 31, windowId: 3, pendingUrl: 'https://example.com/new' });
+  await world.flush();
+  assert.equal(world.activeTimers().length, 1);
+
+  world.windowTabs.set(3, [{ id: 31, windowId: 3, url: 'https://example.com/new' }]);
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, [3]);
+});
+
+test('a window without organizable tabs at the deadline is not organized', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  world.windowTabs.set(4, [{ id: 41, windowId: 4, url: 'chrome://newtab/' }]);
+
+  await world.chrome.tabs.onCreated.emit({ id: 41, windowId: 4 });
+  await world.flush();
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, []);
+});
+
+test('a deadline during another organization is retried when that run finishes', async () => {
+  const world = setupAutoOrganize({ autoOrganizeEnabled: true, autoOrganizeDelay: 5 });
+  const realRun = world.context.runOrganizeWithFeedback;
+  vm.runInContext('isOrganizing = true', world.context);
+
+  await world.chrome.tabs.onCreated.emit({ id: 11, windowId: 1 });
+  await world.flush();
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, []);
+  assert.equal(vm.runInContext('autoOrganizePending.get(1)', world.context), true);
+
+  // The active organization finishes; its cleanup must reschedule the queued window.
+  vm.runInContext('isOrganizing = false', world.context);
+  delete world.context.runOrganizeWithFeedback;
+  await vm.runInContext('runOrganizeWithFeedback', world.context)(1);
+  world.context.runOrganizeWithFeedback = realRun;
+  await world.flush();
+
+  assert.equal(world.activeTimers().length, 1);
+  await world.fireTimers();
+  assert.deepEqual(world.state.runs, [1]);
+});
+
+function withChromeAiResponses(context, responses) {
+  const prompts = [];
+  context.LanguageModel = {
+    availability: async () => 'available',
+    create: async () => ({
+      prompt: async (prompt, options) => {
+        prompts.push({ prompt, options });
+        return responses[prompts.length - 1];
+      },
+      destroy() {},
+    }),
+  };
+  return prompts;
+}
+
+/** Run the full organizeTabs path against a Chrome AI provider returning canned batch responses. */
+function setupChromeAiOrganize(tabCount, responses) {
+  const { chrome, context } = loadBackground();
+  const tabs = Array.from({ length: tabCount }, (_, i) => ({
+    id: i + 1,
+    index: i,
+    pinned: false,
+    groupId: -1,
+    windowId: 1,
+    title: `Tab ${i + 1}`,
+    url: `https://example.com/${i + 1}`,
+  }));
+  const prompts = withChromeAiResponses(context, responses);
+  const groupedTabIds = [];
+  const groupUpdates = [];
+
+  chrome.storage.local.get = async () => ({ aiProvider: 'chrome-ai', aiFallbackEnabled: false });
+  chrome.tabs.query = async () => tabs.map(tab => ({ ...tab }));
+  chrome.tabs.get = async (id) => ({ ...tabs.find(tab => tab.id === id) });
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.group = async ({ tabIds }) => {
+    groupedTabIds.push(...tabIds);
+    return 1;
+  };
+  chrome.tabGroups.update = async (id, properties) => {
+    groupUpdates.push({ id, ...properties });
+  };
+
+  return { chrome, context, tabs, prompts, groupedTabIds, groupUpdates };
+}
+
+test('Chrome AI keeps valid groups when a constrained response has empty groups', async () => {
+  const { context } = loadBackground();
+  const prompts = withChromeAiResponses(context, [
+    '[{"groupName":"Docs","tabIndices":[1,2]},{"groupName":"Nothing","tabIndices":[]}]',
+  ]);
+  const tabs = [
+    { title: 'Docs one', url: 'https://example.com/one' },
+    { title: 'Docs two', url: 'https://example.com/two' },
+  ];
+
+  const groups = await context.callChromeAI(tabs, '', null, 1);
+
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].options.responseConstraint.type, 'array');
+  assert.deepEqual(JSON.parse(JSON.stringify(groups)), [{ groupName: 'Docs', tabIndices: [1, 2] }]);
+});
+
+test('Chrome AI tolerates an empty batch and shifts later batch indices', async () => {
+  const { context } = loadBackground();
+  const batchSize = vm.runInContext('CHROME_AI_TABS_PER_BATCH', context);
+  const tabs = Array.from({ length: batchSize + 2 }, (_, i) => ({
+    title: `Tab ${i + 1}`,
+    url: `https://example.com/${i + 1}`,
+  }));
+  withChromeAiResponses(context, ['[]', '[{"groupName":"Tail","tabIndices":[1,"2"]}]']);
+
+  const groups = await context.callChromeAI(tabs, '', null, 1);
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(groups)),
+    [{ groupName: 'Tail', tabIndices: [batchSize + 1, batchSize + 2] }]
+  );
+});
+
+test('Chrome AI still rejects responses that are not tab groups', async () => {
+  const { context } = loadBackground();
+  withChromeAiResponses(context, ['{"message":"sorry"}']);
+  await assert.rejects(
+    context.callChromeAI([{ title: 'A', url: 'https://example.com/' }], '', null, 1),
+    /Invalid response format from Chrome built-in AI/
+  );
+});
+
+test('organizeTabs puts all tabs in Misc when a single Chrome AI batch is empty', async () => {
+  const world = setupChromeAiOrganize(2, ['[]']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, true);
+  assert.equal(result.providerUsed, 'chrome-ai');
+  assert.equal(result.groupedCount, 2);
+  assert.deepEqual([...world.groupedTabIds].sort((a, b) => a - b), [1, 2]);
+  assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
+});
+
+test('organizeTabs puts all tabs in Misc when Chrome AI returns only empty groups', async () => {
+  const world = setupChromeAiOrganize(2, ['[{"groupName":"Other","tabIndices":[]}]']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, true);
+  assert.equal(result.groupedCount, 2);
+  assert.deepEqual([...world.groupedTabIds].sort((a, b) => a - b), [1, 2]);
+  assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
+});
+
+test('organizeTabs puts all tabs in Misc when every Chrome AI batch is empty', async () => {
+  const batchSize = vm.runInContext('CHROME_AI_TABS_PER_BATCH', loadBackground().context);
+  const world = setupChromeAiOrganize(batchSize + 2, ['[]', '[]']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(world.prompts.length, 2);
+  assert.equal(result.success, true);
+  assert.equal(result.groupedCount, batchSize + 2);
+  assert.equal(world.groupedTabIds.length, batchSize + 2);
+  assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
+});
+
+test('organizeTabs still fails when a Chrome AI response is not a tab-group array', async () => {
+  const world = setupChromeAiOrganize(2, ['{"message":"sorry"}']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, false);
+  assert.equal(world.groupedTabIds.length, 0);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0].detail, /Invalid response format from Chrome built-in AI/);
 });

@@ -1528,6 +1528,37 @@ function withChromeAiResponses(context, responses) {
   return prompts;
 }
 
+/** Run the full organizeTabs path against a Chrome AI provider returning canned batch responses. */
+function setupChromeAiOrganize(tabCount, responses) {
+  const { chrome, context } = loadBackground();
+  const tabs = Array.from({ length: tabCount }, (_, i) => ({
+    id: i + 1,
+    index: i,
+    pinned: false,
+    groupId: -1,
+    windowId: 1,
+    title: `Tab ${i + 1}`,
+    url: `https://example.com/${i + 1}`,
+  }));
+  const prompts = withChromeAiResponses(context, responses);
+  const groupedTabIds = [];
+  const groupUpdates = [];
+
+  chrome.storage.local.get = async () => ({ aiProvider: 'chrome-ai', aiFallbackEnabled: false });
+  chrome.tabs.query = async () => tabs.map(tab => ({ ...tab }));
+  chrome.tabs.get = async (id) => ({ ...tabs.find(tab => tab.id === id) });
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.group = async ({ tabIds }) => {
+    groupedTabIds.push(...tabIds);
+    return 1;
+  };
+  chrome.tabGroups.update = async (id, properties) => {
+    groupUpdates.push({ id, ...properties });
+  };
+
+  return { chrome, context, tabs, prompts, groupedTabIds, groupUpdates };
+}
+
 test('Chrome AI keeps valid groups when a constrained response has empty groups', async () => {
   const { context } = loadBackground();
   const prompts = withChromeAiResponses(context, [
@@ -1569,4 +1600,40 @@ test('Chrome AI still rejects responses that are not tab groups', async () => {
     context.callChromeAI([{ title: 'A', url: 'https://example.com/' }], '', null, 1),
     /Invalid response format from Chrome built-in AI/
   );
+});
+
+test('organizeTabs puts all tabs in Misc when a single Chrome AI batch is empty', async () => {
+  const world = setupChromeAiOrganize(2, ['[]']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, true);
+  assert.equal(result.providerUsed, 'chrome-ai');
+  assert.equal(result.groupedCount, 2);
+  assert.deepEqual([...world.groupedTabIds].sort((a, b) => a - b), [1, 2]);
+  assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
+});
+
+test('organizeTabs puts all tabs in Misc when Chrome AI returns only empty groups', async () => {
+  const world = setupChromeAiOrganize(2, ['[{"groupName":"Other","tabIndices":[]}]']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, true);
+  assert.equal(result.groupedCount, 2);
+  assert.deepEqual([...world.groupedTabIds].sort((a, b) => a - b), [1, 2]);
+  assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
+});
+
+test('organizeTabs puts all tabs in Misc when every Chrome AI batch is empty', async () => {
+  const batchSize = vm.runInContext('CHROME_AI_TABS_PER_BATCH', loadBackground().context);
+  const world = setupChromeAiOrganize(batchSize + 2, ['[]', '[]']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(world.prompts.length, 2);
+  assert.equal(result.success, true);
+  assert.equal(result.groupedCount, batchSize + 2);
+  assert.equal(world.groupedTabIds.length, batchSize + 2);
+  assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
 });

@@ -3483,6 +3483,13 @@ async function createChromeAiSession() {
   }
 }
 
+/**
+ * Marks a Chrome AI result that parsed successfully but contains no usable groups.
+ * organizeTabs() rejects empty provider results in general, so this lets a valid empty
+ * on-device response fall through to the remaining-tabs-to-Misc path instead.
+ */
+const CHROME_AI_EMPTY_RESULT = Symbol('chromeAiEmptyResult');
+
 /** Merge per-batch group lists into one, combining groups that share a name. */
 function mergeGroupBatches(batches) {
   const merged = new Map();
@@ -3995,7 +4002,11 @@ async function organizeTabs(
     for (const provider of usableChain) {
       try {
         const result = await callProvider(provider, settings, tabsForAI, instructions, existingGroupsForAI, minTabs);
-        if (!Array.isArray(result) || result.length === 0) {
+        // Chrome AI may legitimately return no groups (an empty array, or only empty groups)
+        // when Gemini Nano finds nothing worth grouping. Accept it: every tab it did not
+        // assign falls through to the remaining-tab path below and is placed in Misc.
+        const emptyChromeAiResult = provider === 'chrome-ai' && Array.isArray(result) && result.length === 0;
+        if (!Array.isArray(result) || (result.length === 0 && !emptyChromeAiResult)) {
           throw new AiProviderError({ provider, message: `Invalid response from ${providerLabel(provider)}: expected array of groups` });
         }
         groups = result;

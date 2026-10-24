@@ -1114,14 +1114,22 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // (or the full dedupe + AI organize flow when "Organize tabs on click" is enabled)
 chrome.action.onClicked.addListener(async (tab) => {
   try {
-    const { organizeOnClick, githubLabelGroupsOnClick } = await chrome.storage.local.get([
-      'organizeOnClick', 'githubLabelGroupsOnClick'
+    const {
+      organizeOnClick, githubLabelGroupsOnClick,
+      aiProvider, aiFallbackEnabled, localModel, localBaseUrl
+    } = await chrome.storage.local.get([
+      'organizeOnClick', 'githubLabelGroupsOnClick',
+      'aiProvider', 'aiFallbackEnabled', 'localModel', 'localBaseUrl'
     ]);
     const options = {
       includeLabelGroups: githubLabelGroupsOnClick !== false,
       requestHostPermission: true, // Clicking the toolbar is a user gesture.
     };
     if (organizeOnClick === true) {
+      // Before any tab work: the permission prompt needs this click's activation.
+      await grantLocalModelHostPermissionForUserGesture({
+        aiProvider, aiFallbackEnabled, localModel, localBaseUrl
+      });
       await runOrganizeWithFeedback(tab?.windowId, options);
     } else {
       await runDedupeAndTidyPinned(tab?.windowId, options);
@@ -1156,7 +1164,7 @@ async function expandAllTabGroups() {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'dedupe-and-organize') {
-    runOrganizeWithFeedback(tab?.windowId, { requestHostPermission: true });
+    runOrganizeFromUserGesture(tab?.windowId);
   } else if (info.menuItemId === 'reload-all-tabs') {
     reloadAllTabs(tab?.windowId);
   } else if (info.menuItemId === 'collapse-all-groups') {
@@ -1171,7 +1179,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // User-assigned keyboard shortcut.
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'organize-tabs') {
-    runOrganizeWithFeedback(undefined, { requestHostPermission: true });
+    runOrganizeFromUserGesture();
   }
 });
 
@@ -3132,10 +3140,11 @@ function requireAllowedLocalModelUrl(baseUrl) {
 
 /**
  * Loopback origins are permitted by the manifest. A server elsewhere on the
- * network needs the origin permission that "Test connection" in Options asks
- * for, because a service worker has no user gesture to request one with.
+ * network needs an origin permission. `requestIfMissing` only belongs on paths
+ * reached from a real user gesture: chrome.permissions.request needs activation,
+ * and automatic organization must stay check-only.
  */
-async function requireLocalModelHostPermission(baseUrl, requestPermission = false) {
+async function requireLocalModelHostPermission(baseUrl, requestIfMissing = false) {
   let parsed;
   try {
     parsed = new URL(baseUrl);
@@ -3147,15 +3156,55 @@ async function requireLocalModelHostPermission(baseUrl, requestPermission = fals
   const originPattern = globalThis.HostAccess.originPattern(parsed);
   if (await hasOriginPermission(originPattern)) return;
 
-  if (requestPermission) {
-    await requestOriginPermission(originPattern);
+  if (requestIfMissing) {
+    await requestOriginPermission(originPattern, 'local');
     return;
   }
 
   throw new Error(
     `Host permission missing for ${originPattern}. Open Options and click "Test connection" `
-    + 'for the local model server to grant access to that host.'
+    + 'for the local model server, or start organization from the toolbar, to grant access to that host.'
   );
+}
+
+/**
+ * Ask for the local model server's origin from a user-gesture entry point
+ * (toolbar click, context menu, keyboard shortcut). The gesture is why this is
+ * here rather than inside the organizer: automatic organization and alarms have
+ * no activation, so they call the check-only path and report the missing grant.
+ * Returns whether access is available; a denial never stops organization.
+ */
+async function grantLocalModelHostPermissionForUserGesture(settings) {
+  const localCanJoin = settings.aiProvider === 'local'
+    || (settings.aiProvider === 'chrome-ai'
+      && settings.aiFallbackEnabled === true
+      && !!settings.localModel?.trim());
+  if (!localCanJoin) return false;
+
+  const baseUrl = normalizeLocalBaseUrl(settings.localBaseUrl);
+  if (!isAllowedLocalModelUrl(baseUrl)) return false; // The provider reports this when it runs.
+
+  try {
+    await requireLocalModelHostPermission(baseUrl, true);
+    return true;
+  } catch (error) {
+    console.warn('[Smart Tab Organiser] Local model host access was not granted:', error?.message || error);
+    return false;
+  }
+}
+
+/**
+ * Organize from a click or shortcut. Reads the settings the permission prompt
+ * needs first, so the request still belongs to the gesture, then runs the same
+ * flow as before.
+ */
+async function runOrganizeFromUserGesture(windowId, options = {}) {
+  const settings = await chrome.storage.local.get([
+    'aiProvider', 'aiFallbackEnabled', 'localModel', 'localBaseUrl'
+  ]);
+  await grantLocalModelHostPermissionForUserGesture(settings);
+  // requestHostPermission also covers the custom OpenAI host's prompt.
+  return runOrganizeWithFeedback(windowId, { requestHostPermission: true, ...options });
 }
 
 /** Turn a fetch failure against a local server into an actionable message. */
@@ -3742,7 +3791,8 @@ function providerStatusFixMessage(provider, status) {
   }
   if (provider === 'local') {
     if (status === 'missing-host-permission') {
-      return 'Open Options and click "Test connection" for the local model server to grant access to that host.';
+      return 'Open Options and click "Test connection" for the local model server, '
+        + 'or start organization from the toolbar, to grant access to that host.';
     }
     return 'Set a model name in Smart Tab Organiser settings (for example, "llama3.1:8b").';
   }
@@ -3776,8 +3826,9 @@ function normalizeFallbackOrder(saved) {
  * Eligibility encodes the privacy boundary of the primary choice:
  * - A cloud primary falls back to other configured cloud providers. It never switches
  *   to a local provider because that can add latency or trigger a model download.
- * - A local primary falls back to the other local provider. The loopback server needs a
- *   model name, and Chrome built-in AI joins only after its model is downloaded.
+ * - A local primary falls back to the other local provider. The local model server
+ *   needs a model name and host access, and Chrome built-in AI joins only after
+ *   its model is downloaded.
  * - Cloud providers join a local chain only with the explicit aiAllowCloudFallback opt-in.
  *   Within the eligible set, the user's order wins.
  *
@@ -3813,7 +3864,7 @@ async function describeProviderChain(settings) {
     }
     if (localPrimary) {
       if (p === 'local') {
-        const configStatus = await providerConfigurationStatus(p, settings);
+        const configStatus = await providerConfigurationStatus('local', settings);
         if (configStatus !== 'ready') {
           entries.push({ provider: p, status: configStatus });
           continue;
@@ -3917,18 +3968,9 @@ async function organizeTabs(
       providerStatuses = await computeProviderStatuses(providerChain, settings);
     }
 
-    // Same for a local model server on the LAN: this path starts with a toolbar
-    // click, so Chrome lets us ask for the origin. Automatic runs still pass
-    // nothing here and stay check-only.
-    if (requestHostPermission && primary === 'local' && primaryStatus === 'missing-host-permission') {
-      const baseUrl = normalizeLocalBaseUrl(settings.localBaseUrl || '');
-      try {
-        await requireLocalModelHostPermission(baseUrl, true);
-      } catch (_) {
-        // Keep status from a fresh check below so the error remains specific.
-      }
-      providerStatuses = await computeProviderStatuses(providerChain, settings);
-    }
+    // A LAN local model server is granted from the click handlers before this
+    // runs (see grantLocalModelHostPermissionForUserGesture), so this path stays
+    // check-only. A prompt here would come too late to own the user gesture.
 
     const usableChain = providerStatuses
       .filter((entry) => entry.status === 'ready')

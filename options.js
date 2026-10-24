@@ -488,8 +488,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   /**
    * The local model provider only talks to this computer or the local network.
-   * Loopback needs no permission; a server on the LAN needs one granted here,
-   * because the service worker cannot ask (no user gesture when it runs).
+   * Loopback needs no permission; a server on the LAN needs one, and this click
+   * is a user gesture, so the options page can ask for it. Organization from the
+   * toolbar asks for the same origin itself.
    */
   async function requestLocalHostPermissionIfNeeded(rawBaseUrl) {
     let url = (rawBaseUrl || '').trim();

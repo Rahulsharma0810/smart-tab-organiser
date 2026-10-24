@@ -6,7 +6,8 @@
 
 - Added a toolbar-click setting for GitHub label-group sync.
 - Added Chrome colour selectors for each configured GitHub label and the PRs group.
-- Allowed plain HTTP to private-network hosts (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, IPv6 `fc00::/7` and `fe80::/10`) for both the local model server and a custom OpenAI-compatible host. Each such host still needs its own host access, requested once from Options or from a user-started organization. Shared address space (`100.64.0.0/10`) is excluded because a carrier may route it beyond the local network.
+- Allowed plain HTTP to private-network hosts (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, IPv6 `fc00::/7` and `fe80::/10`) for both the local model server and a custom OpenAI-compatible host. Each such host still needs its own host access, requested once from Options or when organization starts from the toolbar.
+- A toolbar-started organization now requests the LAN origin of the local model server itself, so it no longer depends on Options having granted it first. Automatic organization stays check-only.
 
 ### Changed
 
@@ -19,6 +20,7 @@
 ### Privacy and security
 
 - Documented that plain HTTP to a private-network host is unencrypted on the local network, unlike loopback traffic.
+- Stopped treating RFC 6598 Shared Address Space (`100.64.0.0/10`, used by Tailscale) as local. Carriers also route that range, so cleartext requests there can leave the user's network and expose tab data or a custom-host key. Such hosts now require HTTPS.
 
 ## 1.3.1 — August 20, 2026
 

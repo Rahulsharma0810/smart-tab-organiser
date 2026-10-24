@@ -7,11 +7,16 @@
  *   - private networks: RFC 1918 (`10/8`, `172.16/12`, `192.168/16`),
  *     RFC 3927 link-local `169.254/16`, IPv6 unique local `fc00::/7` and
  *     link-local `fe80::/10`
- * Shared address space (`100.64/10`, RFC 6598) is deliberately excluded: an ISP
- * may route it inside its own network, so it cannot be assumed to stay local.
+ *
  * Every other host must use HTTPS. Loopback is the only group the manifest
  * permits up front; the private ranges still need an origin-scoped permission
  * the user grants from the options page.
+ *
+ * RFC 6598 Shared Address Space (`100.64.0.0/10`) is deliberately absent.
+ * Tailscale uses it, but ISPs also route it inside carrier networks, so a
+ * request can leave the user's own network. Treating it as local would send
+ * tab data, and possibly a custom-provider key, over cleartext HTTP off-LAN.
+ * Use HTTPS (for example Tailscale Serve) instead.
  */
 (function (g) {
   'use strict';

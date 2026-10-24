@@ -36,7 +36,9 @@ Cloud fallback requires a separate opt-in. Each attempted cloud provider receive
 
 When the selected provider is **OpenAI Compatible API Host**, you must set a base URL and model name. API key use depends on the host. During test or organization, the extension requests access only to the configured host origin.
 
-For custom hosts on another machine or network, use `https://`. Public `http://` endpoints are blocked. `http://` is supported for loopback hosts (for example `localhost` and `127.0.0.1`) and for private-network addresses: `10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, and IPv6 `fc00::/7` or `fe80::/10`. Loopback needs no permission; every other host is asked for once, the first time you test it. `100.64.0.0/10` (shared address space, RFC 6598) is not treated as local: a carrier may route it beyond your network, so such hosts must use `https://`.
+For custom hosts on another machine or network, use `https://`. Public `http://` endpoints are blocked. `http://` is supported for loopback hosts (for example `localhost` and `127.0.0.1`) and for private-network addresses: `10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, and IPv6 `fc00::/7` or `fe80::/10`. Loopback needs no permission; every other host is asked for once, the first time you test it or organize from the toolbar.
+
+The carrier-grade NAT range `100.64.0.0/10`, which Tailscale uses, is not treated as local: ISPs also route that range inside their own networks, so plain HTTP there can leave your network. Use `https://` for such a host (for example with Tailscale Serve), or a private-network address.
 
 ### Chrome built-in AI (Gemini Nano)
 
@@ -50,7 +52,7 @@ Nothing to install — the model runs inside Chrome itself.
 
 ### Local model server (Ollama, LM Studio, llama.cpp, vLLM)
 
-The extension connects only to an OpenAI-compatible server on this computer or your own local network: `localhost`, `127.0.0.1`, or a private-network address such as `192.168.1.20`. A server elsewhere on the network needs host access, which **Test connection** requests once. The server configuration controls local processing and any forwarding.
+The extension connects only to an OpenAI-compatible server on this computer or your own local network: `localhost`, `127.0.0.1`, or a private-network address such as `192.168.1.20`. A server elsewhere on the network needs host access, which **Test connection** requests once, or which is requested when you start organization from the toolbar. The server configuration controls local processing and any forwarding.
 
 1. Install a runtime and pull a model. For example, use `ollama pull llama3.1:8b`.
 2. **Start the server so it accepts requests from extensions.** Ollama rejects unknown origins, so it must be launched with:

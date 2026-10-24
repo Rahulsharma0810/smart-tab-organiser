@@ -24,7 +24,7 @@
 
 ### Fixed
 
-- Chrome built-in AI no longer fails with "unexpected response" when Gemini Nano returns an empty batch or a group without tab numbers. The extension now drops only the empty groups.
+- Chrome built-in AI no longer fails with "unexpected response" when Gemini Nano returns an empty batch or a group without tab numbers. The extension drops only the empty groups, and tabs from a response with no groups go to Misc.
 
 ### Fixed
 

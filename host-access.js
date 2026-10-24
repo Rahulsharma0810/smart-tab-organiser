@@ -5,8 +5,10 @@
  * `http://` to hosts that cannot leave the user's own machine or local network:
  *   - loopback: `localhost`, `*.localhost`, `127.0.0.0/8`, `::1`
  *   - private networks: RFC 1918 (`10/8`, `172.16/12`, `192.168/16`),
- *     RFC 6598 CGNAT `100.64/10` (Tailscale and similar), RFC 3927 link-local
- *     `169.254/16`, IPv6 unique local `fc00::/7` and link-local `fe80::/10`
+ *     RFC 3927 link-local `169.254/16`, IPv6 unique local `fc00::/7` and
+ *     link-local `fe80::/10`
+ * Shared address space (`100.64/10`, RFC 6598) is deliberately excluded: an ISP
+ * may route it inside its own network, so it cannot be assumed to stay local.
  * Every other host must use HTTPS. Loopback is the only group the manifest
  * permits up front; the private ranges still need an origin-scoped permission
  * the user grants from the options page.
@@ -15,7 +17,7 @@
   'use strict';
 
   var ALLOWED_HTTP_HOSTS_HINT = 'HTTP is allowed only for localhost or 127.0.0.1, '
-    + 'or a private-network address (10.x, 172.16-31.x, 192.168.x, 100.64-127.x, 169.254.x, '
+    + 'or a private-network address (10.x, 172.16-31.x, 192.168.x, 169.254.x, '
     + 'and IPv6 fc00::/7 or fe80::/10).';
 
   /** Strip the brackets `URL` keeps around IPv6 hosts, plus any zone id. */
@@ -45,7 +47,6 @@
     if (a === 10) return true;                            // RFC 1918 10.0.0.0/8
     if (a === 172 && b >= 16 && b <= 31) return true;    // RFC 1918 172.16.0.0/12
     if (a === 192 && b === 168) return true;              // RFC 1918 192.168.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true;    // RFC 6598 100.64.0.0/10
     if (a === 169 && b === 254) return true;              // RFC 3927 169.254.0.0/16
     return false;
   }

@@ -838,7 +838,8 @@ async function runOrganizeWithFeedback(windowId, options = {}) {
       customInstructions,
       preserveGroupsMinTabs,
       targetWindowId,
-      githubIssueSync.preservedTabIds
+      githubIssueSync.preservedTabIds,
+      options.requestHostPermission === true
     );
     chrome.notifications.clear('organize-progress');
     if (!result.success) {
@@ -1116,7 +1117,10 @@ chrome.action.onClicked.addListener(async (tab) => {
     const { organizeOnClick, githubLabelGroupsOnClick } = await chrome.storage.local.get([
       'organizeOnClick', 'githubLabelGroupsOnClick'
     ]);
-    const options = { includeLabelGroups: githubLabelGroupsOnClick !== false };
+    const options = {
+      includeLabelGroups: githubLabelGroupsOnClick !== false,
+      requestHostPermission: true, // Clicking the toolbar is a user gesture.
+    };
     if (organizeOnClick === true) {
       await runOrganizeWithFeedback(tab?.windowId, options);
     } else {
@@ -1152,7 +1156,7 @@ async function expandAllTabGroups() {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'dedupe-and-organize') {
-    runOrganizeWithFeedback(tab?.windowId);
+    runOrganizeWithFeedback(tab?.windowId, { requestHostPermission: true });
   } else if (info.menuItemId === 'reload-all-tabs') {
     reloadAllTabs(tab?.windowId);
   } else if (info.menuItemId === 'collapse-all-groups') {
@@ -1167,7 +1171,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // User-assigned keyboard shortcut.
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'organize-tabs') {
-    runOrganizeWithFeedback();
+    runOrganizeWithFeedback(undefined, { requestHostPermission: true });
   }
 });
 
@@ -3131,7 +3135,7 @@ function requireAllowedLocalModelUrl(baseUrl) {
  * network needs the origin permission that "Test connection" in Options asks
  * for, because a service worker has no user gesture to request one with.
  */
-async function requireLocalModelHostPermission(baseUrl) {
+async function requireLocalModelHostPermission(baseUrl, requestPermission = false) {
   let parsed;
   try {
     parsed = new URL(baseUrl);
@@ -3142,6 +3146,11 @@ async function requireLocalModelHostPermission(baseUrl) {
 
   const originPattern = globalThis.HostAccess.originPattern(parsed);
   if (await hasOriginPermission(originPattern)) return;
+
+  if (requestPermission) {
+    await requestOriginPermission(originPattern);
+    return;
+  }
 
   throw new Error(
     `Host permission missing for ${originPattern}. Open Options and click "Test connection" `
@@ -3804,8 +3813,9 @@ async function describeProviderChain(settings) {
     }
     if (localPrimary) {
       if (p === 'local') {
-        if (!settings.localModel?.trim()) {
-          entries.push({ provider: p, status: 'no-model-name' });
+        const configStatus = await providerConfigurationStatus(p, settings);
+        if (configStatus !== 'ready') {
+          entries.push({ provider: p, status: configStatus });
           continue;
         }
       } else if (p === 'chrome-ai') {
@@ -3862,7 +3872,8 @@ async function organizeTabs(
   customInstructions,
   preserveGroupsMinTabs = 1,
   windowId,
-  additionalPreservedTabIds = []
+  additionalPreservedTabIds = [],
+  requestHostPermission = false
 ) {
   try {
     const minTabs = parseMinTabs(preserveGroupsMinTabs);
@@ -3896,10 +3907,23 @@ async function organizeTabs(
     const primary = providerChain[0] || 'openai';
     const primaryStatus = providerStatuses.find((entry) => entry.provider === primary)?.status || 'no-key';
 
-    if (primary === 'custom-openai' && primaryStatus === 'missing-host-permission') {
+    if (requestHostPermission && primary === 'custom-openai' && primaryStatus === 'missing-host-permission') {
       const baseUrl = normalizeCustomOpenAIBaseUrl(settings.customOpenaiBaseUrl || '');
       try {
         await ensureCustomOpenAIHostPermission(baseUrl, true);
+      } catch (_) {
+        // Keep status from a fresh check below so the error remains specific.
+      }
+      providerStatuses = await computeProviderStatuses(providerChain, settings);
+    }
+
+    // Same for a local model server on the LAN: this path starts with a toolbar
+    // click, so Chrome lets us ask for the origin. Automatic runs still pass
+    // nothing here and stay check-only.
+    if (requestHostPermission && primary === 'local' && primaryStatus === 'missing-host-permission') {
+      const baseUrl = normalizeLocalBaseUrl(settings.localBaseUrl || '');
+      try {
+        await requireLocalModelHostPermission(baseUrl, true);
       } catch (_) {
         // Keep status from a fresh check below so the error remains specific.
       }
@@ -4412,7 +4436,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           request.customInstructions,
           parseMinTabs(minTabsRaw),
           targetWindowId,
-          githubIssueSync.preservedTabIds
+          githubIssueSync.preservedTabIds,
+          true // This path starts from a click, so Chrome allows the host prompt.
         );
         await reconcileManagedTabGroupsSafely(targetWindowId);
         return result;
@@ -4518,7 +4543,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     (async () => {
       const settings = await chrome.storage.local.get([
         'openaiKey', 'claudeKey', 'geminiKey', 'aiProvider', 'aiFallbackEnabled',
-        'aiAllowCloudFallback', 'aiFallbackOrder', 'localModel',
+        'aiAllowCloudFallback', 'aiFallbackOrder', 'localModel', 'localBaseUrl',
         'customOpenaiBaseUrl', 'customOpenaiKey', 'customOpenaiModel'
       ]);
       return describeProviderChain(settings);

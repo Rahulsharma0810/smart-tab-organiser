@@ -19,6 +19,7 @@ const HOST_ACCESS_SOURCE = fs.readFileSync(
 function eventStub() {
   const listeners = [];
   return {
+    listeners,
     addListener(listener) {
       listeners.push(listener);
     },
@@ -383,9 +384,9 @@ test('custom OpenAI host access rejects public HTTP but allows a private-network
   assert.equal(ready.status, 'ready');
   assert.equal(ready.originPattern, 'http://192.168.1.20:11434/*');
 
-  const ungranted = await context.customOpenAIHostAccessStatus('http://100.64.0.1:11434/v1');
+  const ungranted = await context.customOpenAIHostAccessStatus('http://192.168.1.21:11434/v1');
   assert.equal(ungranted.status, 'missing-host-permission');
-  assert.equal(ungranted.originPattern, 'http://100.64.0.1:11434/*');
+  assert.equal(ungranted.originPattern, 'http://192.168.1.21:11434/*');
 
   const publicHost = await context.customOpenAIHostAccessStatus('http://models.example.com/v1');
   assert.equal(publicHost.status, 'insecure-http-url');
@@ -586,6 +587,51 @@ test('custom OpenAI chain marks missing host permission as not ready', async () 
   assert.deepEqual(Array.from(description.chain), ['openai', 'claude']);
 });
 
+test('local fallback without host permission is not shown as ready', async () => {
+  const { chrome, context } = loadBackground();
+  chrome.permissions.contains = async () => false;
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'chrome-ai',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['local', 'claude'],
+    localModel: 'llama3.1:8b',
+    localBaseUrl: 'http://192.168.1.20:11434/v1',
+    claudeKey: 'claude-key',
+  });
+
+  const localEntry = description.entries.find((entry) => entry.provider === 'local');
+  assert.equal(localEntry.status, 'missing-host-permission');
+  assert.deepEqual(Array.from(description.chain), ['chrome-ai']);
+});
+
+test('describeProviderChain message loads the local base URL for its status', async () => {
+  const { chrome } = loadBackground();
+  chrome.permissions.contains = async () => false;
+  chrome.storage.local.get = async (keys) => {
+    assert.ok(keys.includes('localBaseUrl'), 'handler must read localBaseUrl');
+    return {
+      aiProvider: 'chrome-ai',
+      aiFallbackEnabled: true,
+      aiFallbackOrder: ['local'],
+      localModel: 'llama3.1:8b',
+      localBaseUrl: 'http://192.168.1.20:11434/v1',
+    };
+  };
+
+  const listener = chrome.runtime.onMessage.listeners[0];
+  assert.ok(listener, 'background registers a message listener');
+
+  const response = await new Promise((resolve) => {
+    const async = listener({ action: 'describeProviderChain' }, {}, resolve);
+    assert.equal(async, true);
+  });
+
+  assert.equal(response.success, true);
+  const localEntry = response.entries.find((entry) => entry.provider === 'local');
+  assert.equal(localEntry.status, 'missing-host-permission');
+});
+
 test('organizeTabs requests custom host permission before any grouping mutation', async () => {
   const { chrome, context } = loadBackground();
   const tabs = [
@@ -621,13 +667,36 @@ test('organizeTabs requests custom host permission before any grouping mutation'
     throw new Error('fetch should not run when permission is denied');
   };
 
-  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+  const result = await context.organizeTabs(false, false, '', 1, 1, [], true);
   assert.equal(result.success, false);
   assert.match(result.error, /OpenAI Compatible API Host is not configured\./);
   assert.match(result.error, /Fetch models/);
   assert.equal(callOrder.includes('ungroup'), false);
   assert.equal(callOrder.includes('request'), true);
   assert.equal(callOrder.at(-1), 'contains');
+});
+
+test('automatic organization never prompts for host access', async () => {
+  const { chrome, context } = loadBackground();
+  let requests = 0;
+
+  chrome.storage.local.get = async () => ({
+    aiProvider: 'local',
+    aiFallbackEnabled: false,
+    localModel: 'llama3.1:8b',
+    localBaseUrl: 'http://192.168.1.20:11434/v1',
+  });
+  chrome.permissions.contains = async () => false;
+  chrome.permissions.request = async () => {
+    requests += 1;
+    return true;
+  };
+
+  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(requests, 0, 'no prompt without a user gesture');
+  assert.equal(result.success, false);
+  assert.match(result.error, /Test connection/);
 });
 
 test('custom OpenAI base URL keeps query values with trailing slashes', () => {

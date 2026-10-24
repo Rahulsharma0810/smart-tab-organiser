@@ -365,6 +365,8 @@ test('a gesture grant asks for nothing when the local server cannot join the cha
     { aiProvider: 'openai', localBaseUrl: 'http://192.168.1.20:11434', localModel: 'llama3.1:8b' },
     // Local fallback with no model name cannot run.
     { aiProvider: 'chrome-ai', aiFallbackEnabled: true, localBaseUrl: 'http://192.168.1.20:11434' },
+    // A local primary with no model name cannot run either, so do not prompt.
+    { aiProvider: 'local', localBaseUrl: 'http://192.168.1.20:11434' },
     // Loopback is already permitted by the manifest.
     { aiProvider: 'local', localBaseUrl: 'http://localhost:11434', localModel: 'llama3.1:8b' },
   ]) {

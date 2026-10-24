@@ -404,8 +404,8 @@
           <div class="setting-info">
             <label class="setting-label" for="excludedDomains">Never organize these domains</label>
             <p class="setting-description">
-              One domain per line. Matching tabs are never sent to AI and are never grouped, ungrouped, or moved by organization.
-              <br><code>youtube.com</code> also matches subdomains such as <code>music.youtube.com</code>. Full URLs and a leading <code>*.</code> are accepted; lines starting with <code>#</code> are ignored.
+              One domain per line. Matching tabs are never sent to AI — not even as sample titles — and are never grouped, ungrouped, reordered, or moved by organization.
+              <br><code>youtube.com</code> also matches subdomains such as <code>music.youtube.com</code>, and a trailing dot such as <code>youtube.com.</code> is treated as the same host. Full URLs and a leading <code>*.</code> are accepted; lines starting with <code>#</code> are ignored.
             </p>
           </div>
           <textarea id="excludedDomains" class="custom-instructions-textarea" placeholder="youtube.com&#10;mail.google.com" rows="3" spellcheck="false"></textarea>
@@ -481,7 +481,7 @@
             <label class="setting-label">Sort tabs within groups by title</label>
             <p class="setting-description">
               When enabled, after organization, tabs inside each group are ordered alphabetically by page title (A–Z).
-              <br><strong>BOOKMARKS</strong> and <strong>PRs</strong> groups are not reordered.
+              <br><strong>BOOKMARKS</strong> and <strong>PRs</strong> groups are not reordered. A group containing a tab from your excluded domains also keeps its current order.
             </p>
           </div>
           <label class="switch">

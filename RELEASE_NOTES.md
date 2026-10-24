@@ -15,6 +15,14 @@
 - Managed groups now appear after pinned tabs in this order: BOOKMARKS, PRs, configured labels, Closed.
 - Default label colours avoid the BOOKMARKS, PRs, and Closed colours until the available palette is full.
 
+### Fixed
+
+- Merge mode no longer sends excluded tabs to AI as sample titles from a preserved group.
+- Refine mode reuses existing groups whose names exceed 20 characters; the limit now applies only to new group names.
+- Refine mode applies the minimum new-group size to the tabs that actually move, after stale tabs are dropped.
+- A hostname with a trailing dot, such as `youtube.com.`, now matches its configured excluded domain.
+- **Sort tabs within groups by title** no longer reorders a group that contains an excluded tab.
+
 ## 1.3.1 — August 20, 2026
 
 ### Changed

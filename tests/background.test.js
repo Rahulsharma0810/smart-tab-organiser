@@ -1637,3 +1637,14 @@ test('organizeTabs puts all tabs in Misc when every Chrome AI batch is empty', a
   assert.equal(world.groupedTabIds.length, batchSize + 2);
   assert.deepEqual(world.groupUpdates.map(update => update.title), ['Misc']);
 });
+
+test('organizeTabs still fails when a Chrome AI response is not a tab-group array', async () => {
+  const world = setupChromeAiOrganize(2, ['{"message":"sorry"}']);
+
+  const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, false);
+  assert.equal(world.groupedTabIds.length, 0);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0].detail, /Invalid response format from Chrome built-in AI/);
+});

@@ -3573,7 +3573,14 @@ async function callChromeAI(tabs, customInstructions, existingGroups = null, min
     })));
   }
 
-  return mergeGroupBatches(results);
+  const merged = mergeGroupBatches(results);
+  // A response with no usable groups in any batch is valid, not a parse failure:
+  // every batch parsed and simply assigned nothing. Mark it so organizeTabs() lets
+  // those tabs take the existing remaining-tabs path into Misc.
+  if (merged.length === 0) {
+    Object.defineProperty(merged, CHROME_AI_EMPTY_RESULT, { value: true });
+  }
+  return merged;
 }
 // Organize tabs using AI
 function tabTitleForSort(tab) {
@@ -4003,10 +4010,11 @@ async function organizeTabs(
       try {
         const result = await callProvider(provider, settings, tabsForAI, instructions, existingGroupsForAI, minTabs);
         // Chrome AI may legitimately return no groups (an empty array, or only empty groups)
-        // when Gemini Nano finds nothing worth grouping. Accept it: every tab it did not
+        // when Gemini Nano finds nothing worth grouping. callChromeAI() marks that valid
+        // empty result; a genuine parse failure still throws there. Every tab it did not
         // assign falls through to the remaining-tab path below and is placed in Misc.
-        const emptyChromeAiResult = provider === 'chrome-ai' && Array.isArray(result) && result.length === 0;
-        if (!Array.isArray(result) || (result.length === 0 && !emptyChromeAiResult)) {
+        const validEmptyChromeAiResult = Array.isArray(result) && result[CHROME_AI_EMPTY_RESULT] === true;
+        if (!Array.isArray(result) || (result.length === 0 && !validEmptyChromeAiResult)) {
           throw new AiProviderError({ provider, message: `Invalid response from ${providerLabel(provider)}: expected array of groups` });
         }
         groups = result;

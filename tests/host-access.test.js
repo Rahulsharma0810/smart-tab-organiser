@@ -34,8 +34,6 @@ test('plain HTTP is allowed for loopback and private-network hosts', () => {
     'http://172.31.255.254:8000/v1',
     'http://192.168.1.20:11434/v1',
     'http://192.168.0.1:8000/v1',
-    'http://100.64.0.1:11434/v1',   // Tailscale
-    'http://100.127.255.254:11434/v1',
     'http://169.254.10.10:8000/v1',
     'http://[fd00::1]:11434/v1',    // IPv6 unique local
     'http://[fc00::abcd]:11434/v1',
@@ -63,6 +61,8 @@ test('plain HTTP is refused for public hosts and near misses', () => {
     'http://172.32.0.9:8000/v1',   // just above it
     'http://192.169.1.20:11434/v1',
     'http://100.63.255.255:11434/v1', // just below RFC 6598 100.64.0.0/10
+    'http://100.64.0.1:11434/v1',     // RFC 6598; carriers route it too, so not trusted
+    'http://100.127.255.254:11434/v1',
     'http://100.128.0.1:11434/v1',    // just above it
     'http://169.253.10.10:8000/v1',
     'http://11.0.0.4:8000/v1',
@@ -136,7 +136,30 @@ test('the local model provider is limited to this computer and the local network
 test('the HTTP hint names the ranges a user can act on', () => {
   const { ALLOWED_HTTP_HOSTS_HINT } = loadHostAccess();
 
-  for (const fragment of ['localhost', '127.0.0.1', '10.x', '172.16-31.x', '192.168.x', '100.64-127.x']) {
+  for (const fragment of ['localhost', '127.0.0.1', '10.x', '172.16-31.x', '192.168.x']) {
     assert.ok(ALLOWED_HTTP_HOSTS_HINT.includes(fragment), fragment);
   }
+  assert.ok(!ALLOWED_HTTP_HOSTS_HINT.includes('100.'), '100.64/10 must not be advertised');
+});
+
+test('RFC 6598 is not treated as the user\'s own network, even for Tailscale', () => {
+  const hostAccess = loadHostAccess();
+
+  for (const url of [
+    'http://100.64.0.1:11434/v1',
+    'http://100.100.100.100:11434/v1',
+  ]) {
+    assert.equal(hostAccess.allowsPlainHttpUrl(new URL(url)), false, url);
+    assert.equal(hostAccess.isPrivateNetworkHostname(new URL(url).hostname), false, url);
+    assert.equal(hostAccess.allowsLocalProviderUrl(new URL(url)), false, url);
+  }
+
+  // MagicDNS-style names were never private-network names; only HTTPS reaches them.
+  const tailnetName = new URL('http://box.tailnet-abc.ts.net/v1');
+  assert.equal(hostAccess.allowsPlainHttpUrl(tailnetName), false);
+  assert.equal(hostAccess.isPrivateNetworkHostname(tailnetName.hostname), false);
+  assert.equal(
+    hostAccess.allowsLocalProviderUrl(new URL('https://box.tailnet-abc.ts.net/v1')),
+    false
+  );
 });

@@ -8,7 +8,8 @@
 - Added Chrome colour selectors for each configured GitHub label and the PRs group.
 - Added a **Never organize these domains** setting. AI organization does not send matching tabs to a provider and does not move them.
 - Added an opt-in **Refine existing groups** mode. It keeps user groups, moves only tabs that the AI places in another group, and never renames groups.
-- Allowed plain HTTP to private-network hosts (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `100.64`–`100.127.x`, `169.254.x`, IPv6 `fc00::/7` and `fe80::/10`) for both the local model server and a custom OpenAI-compatible host. Each such host still needs its own host access, requested once from Options.
+- Allowed plain HTTP to private-network hosts (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, IPv6 `fc00::/7` and `fe80::/10`) for both the local model server and a custom OpenAI-compatible host. Each such host still needs its own host access, requested once from Options or when organization starts from the toolbar.
+- A toolbar-started organization now requests the LAN origin of the local model server itself, so it no longer depends on Options having granted it first. Automatic organization stays check-only.
 
 ### Changed
 
@@ -21,12 +22,11 @@
 ### Privacy and security
 
 - Documented that plain HTTP to a private-network host is unencrypted on the local network, unlike loopback traffic.
+- Stopped treating RFC 6598 Shared Address Space (`100.64.0.0/10`, used by Tailscale) as local. Carriers also route that range, so cleartext requests there can leave the user's network and expose tab data or a custom-host key. Such hosts now require HTTPS.
 
 ### Fixed
 
 - Chrome built-in AI no longer fails with "unexpected response" when Gemini Nano returns an empty batch or a group without tab numbers. The extension drops only the empty groups, and tabs from a response with no groups go to Misc.
-
-### Fixed
 
 - Merge mode no longer sends excluded tabs to AI as sample titles from a preserved group.
 - Refine mode reuses existing groups whose names exceed 20 characters; the limit now applies only to new group names.

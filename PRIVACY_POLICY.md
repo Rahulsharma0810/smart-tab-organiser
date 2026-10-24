@@ -87,7 +87,9 @@ The extension requests host permission for a custom host only when the user test
 
 For custom hosts on the public internet, the extension requires HTTPS. The extension blocks public `http://` custom hosts to avoid sending prompts or credentials without transport encryption.
 
-The extension allows `http://` only for hosts that cannot leave the user's own machine or local network: the statically permitted loopback hosts on the same computer (`localhost` and `127.0.0.1`), and private-network addresses — `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (carrier-grade NAT, including Tailscale), `169.254.0.0/16`, and the IPv6 ranges `fc00::/7` and `fe80::/10`. Every private-network host still needs its own origin-scoped permission, which the user grants from the options page.
+The extension allows `http://` only for hosts that cannot leave the user's own machine or local network: the statically permitted loopback hosts on the same computer (`localhost` and `127.0.0.1`), and private-network addresses — `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, and the IPv6 ranges `fc00::/7` and `fe80::/10`. Every private-network host still needs its own origin-scoped permission, which the user grants from the options page or by starting organization from the toolbar.
+
+RFC 6598 Shared Address Space (`100.64.0.0/10`) is not included. Tailscale uses it, but carriers also route it inside their own networks, so a request to that range is not guaranteed to stay on the user's own network. Such a host is treated as any other insecure host and must use `https://`.
 
 ### Provider fallback
 
@@ -105,7 +107,7 @@ Chrome can download the local model from Google. Chrome controls that model down
 
 ### Local model server
 
-The local-model feature sends the AI prompt to a server on the user's own computer or local network. That is either a loopback host (`localhost`, `127.0.0.1`, or another address in `127.0.0.0/8`) or a private-network address as listed above, such as `192.168.1.20`. A server on another machine in the network requires the user to grant host access for that host from the options page.
+The local-model feature sends the AI prompt to a server on the user's own computer or local network. That is either a loopback host (`localhost`, `127.0.0.1`, or another address in `127.0.0.0/8`) or a private-network address as listed above, such as `192.168.1.20`. A server on another machine in the network requires the user to grant host access for that host, either from the options page or by starting organization from the toolbar.
 
 The extension sends tab URLs without query parameters or fragments. URL paths can still contain personal or sensitive information.
 
@@ -169,7 +171,7 @@ The extension package contains all executable code. It does not download or exec
 | `contextMenus` | Add tab-management commands to the extension action menu. |
 | AI API hosts | Send user-started requests to the selected cloud AI provider. |
 | Optional host permission (`https://*/*`) | Allow runtime, origin-scoped HTTPS access for a configured custom OpenAI-compatible host after a user gesture. |
-| Optional host permission (`http://*/*`) | Allow runtime, origin-scoped HTTP access to a private-network host on the user's own network (for example `192.168.1.20` or `100.64.0.1`) after a user gesture. Chrome match patterns cannot express a private range, so the request is scoped to the single origin the user typed. The extension requests this only for private-network hosts and never for a public `http://` host. Loopback HTTP uses the static `localhost` and `127.0.0.1` permissions above. |
+| Optional host permission (`http://*/*`) | Allow runtime, origin-scoped HTTP access to a private-network host on the user's own network (for example `192.168.1.20`) after a user gesture. Chrome match patterns cannot express a private range, so the request is scoped to the single origin the user typed. The extension requests this only for private-network hosts and never for a public `http://` host, including RFC 6598 `100.64.0.0/10`. Loopback HTTP uses the static `localhost` and `127.0.0.1` permissions above. |
 | `api.github.com` | Run optional GitHub PR, Closed, and issue-label group features. |
 | `localhost` and `127.0.0.1` | Contact an optional model server on the same computer. |
 

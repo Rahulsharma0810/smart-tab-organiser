@@ -11,7 +11,7 @@ A Chrome extension that **deduplicates tabs**, **tidies pinned tab lists**, main
 - **No analytics**: No telemetry or tracking from this extension.
 - **Local AI options**: Chrome built-in AI processes prompts on your computer. The local model provider sends prompts only to a server on your computer or your own local network.
 - **Optional cloud features**: Cloud AI and GitHub tab groups send data only after you configure a provider and use the applicable feature.
-- **Custom OpenAI-compatible hosts**: The extension requests host access for a custom host only when you test or use that host. Remote custom hosts must use HTTPS. Plain HTTP is allowed only for loopback hosts and private-network addresses (for example `192.168.1.20` or `100.64.0.1`).
+- **Custom OpenAI-compatible hosts**: The extension requests host access for a custom host only when you test or use that host. Remote custom hosts must use HTTPS. Plain HTTP is allowed only for loopback hosts and private-network addresses (for example `192.168.1.20`). Shared address space (`100.64.0.0/10`) is excluded because an ISP may route it beyond your network.
 - [Privacy Policy](PRIVACY_POLICY.md)
 - [Release notes](RELEASE_NOTES.md)
 
@@ -38,7 +38,9 @@ Cloud fallback requires a separate opt-in. Each attempted cloud provider receive
 
 When the selected provider is **OpenAI Compatible API Host**, you must set a base URL and model name. API key use depends on the host. During test or organization, the extension requests access only to the configured host origin.
 
-For custom hosts on another machine or network, use `https://`. Public `http://` endpoints are blocked. `http://` is supported for loopback hosts (for example `localhost` and `127.0.0.1`) and for private-network addresses: `10.x`, `172.16`–`172.31.x`, `192.168.x`, `100.64`–`100.127.x` (CGNAT and Tailscale), `169.254.x`, and IPv6 `fc00::/7` or `fe80::/10`. Loopback needs no permission; every other host is asked for once, the first time you test it.
+For custom hosts on another machine or network, use `https://`. Public `http://` endpoints are blocked. `http://` is supported for loopback hosts (for example `localhost` and `127.0.0.1`) and for private-network addresses: `10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, and IPv6 `fc00::/7` or `fe80::/10`. Loopback needs no permission; every other host is asked for once, the first time you test it or organize from the toolbar.
+
+The carrier-grade NAT range `100.64.0.0/10`, which Tailscale uses, is not treated as local: ISPs also route that range inside their own networks, so plain HTTP there can leave your network. Use `https://` for such a host (for example with Tailscale Serve), or a private-network address.
 
 ### Chrome built-in AI (Gemini Nano)
 
@@ -52,7 +54,7 @@ Nothing to install — the model runs inside Chrome itself.
 
 ### Local model server (Ollama, LM Studio, llama.cpp, vLLM)
 
-The extension connects only to an OpenAI-compatible server on this computer or your own local network: `localhost`, `127.0.0.1`, or a private-network address such as `192.168.1.20`. A server elsewhere on the network needs host access, which **Test connection** requests once. The server configuration controls local processing and any forwarding.
+The extension connects only to an OpenAI-compatible server on this computer or your own local network: `localhost`, `127.0.0.1`, or a private-network address such as `192.168.1.20`. A server elsewhere on the network needs host access, which **Test connection** requests once, or which is requested when you start organization from the toolbar. The server configuration controls local processing and any forwarding.
 
 1. Install a runtime and pull a model. For example, use `ollama pull llama3.1:8b`.
 2. **Start the server so it accepts requests from extensions.** Ollama rejects unknown origins, so it must be launched with:
@@ -200,7 +202,7 @@ Assign a key to **Organize tabs with AI** at `chrome://extensions/shortcuts`.
 | Host access for OpenAI, Anthropic, Gemini, GitHub | Used only for configured cloud AI and GitHub features. Cloud AI receives titles, sanitized URLs, custom instructions, and relevant group names. |
 | Optional host access for custom OpenAI-compatible hosts | Requested at runtime only when you test or use a configured custom host. Public hosts must use HTTPS. |
 | Host access for `localhost` / `127.0.0.1` | Reaches a model server on this computer with no prompt. |
-| Optional host access for private-network hosts | Requested at runtime only when you test or use a host on your own network (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `100.64`–`100.127.x`, `169.254.x`, IPv6 `fc00::/7`, `fe80::/10`). No other `http://` host is reachable. |
+| Optional host access for private-network hosts | Requested at runtime only when you test or use a host on your own network (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `169.254.x`, IPv6 `fc00::/7`, `fe80::/10`). No other `http://` host is reachable. |
 
 Details: [PRIVACY_POLICY.md](PRIVACY_POLICY.md).
 

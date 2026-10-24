@@ -331,16 +331,26 @@ function normalizeTabIndices(indices) {
     .filter((idx) => Number.isInteger(idx) && idx > 0);
 }
 
-function isValidGroupsArray(value) {
-  if (!Array.isArray(value) || value.length === 0) return false;
-  return value.every(
-    (g) =>
-      g &&
-      typeof g === 'object' &&
-      typeof g.groupName === 'string' &&
-      Array.isArray(g.tabIndices) &&
-      normalizeTabIndices(g.tabIndices).length > 0
-  );
+function normalizeAiGroupsArray(value) {
+  if (!Array.isArray(value)) return [];
+
+  const groups = [];
+  for (const group of value) {
+    if (
+      !group ||
+      typeof group !== 'object' ||
+      typeof group.groupName !== 'string' ||
+      !group.groupName.trim() ||
+      !Array.isArray(group.tabIndices)
+    ) {
+      continue;
+    }
+
+    const tabIndices = normalizeTabIndices(group.tabIndices);
+    if (tabIndices.length === 0) continue;
+    groups.push({ groupName: group.groupName, tabIndices });
+  }
+  return groups;
 }
 
 /** Parse AI tab-grouping response; ignores non-JSON bracketed text like [domain.com]. */
@@ -383,11 +393,11 @@ function parseAiGroupsResponse(content) {
       if (!Array.isArray(parsed) && parsed && typeof parsed === 'object' && parsed.groupName) {
         parsed = [parsed];
       }
-      if (!isValidGroupsArray(parsed)) continue;
-      return parsed.map((g) => ({
-        groupName: g.groupName,
-        tabIndices: normalizeTabIndices(g.tabIndices),
-      }));
+      // A constrained model can still append an empty placeholder group. Keep the
+      // usable groups; tabs omitted with a discarded group are added to Misc later.
+      const groups = normalizeAiGroupsArray(parsed);
+      if (groups.length === 0) continue;
+      return groups;
     } catch (_) {
       // try next candidate
     }
@@ -584,12 +594,15 @@ function classifyAiError(err) {
     };
   }
   if (status === 403 || /forbidden|permission denied|not allowed/.test(lower)) {
+    const hint = provider === 'local'
+      ? 'Allow Chrome extension requests in the local server. For Ollama, restart it with OLLAMA_ORIGINS="chrome-extension://*"; for LM Studio, enable CORS.'
+      : `Your ${label} key may not have access to the selected model.`;
     return {
       type: 'forbidden',
       provider,
       summary: `${label} denied the request (HTTP 403).`,
       detail: baseMsg,
-      hint: `Your ${label} key may not have access to the selected model.`,
+      hint,
     };
   }
   if (status === 429 || /rate limit|quota|too many requests/.test(lower)) {
@@ -3308,9 +3321,15 @@ async function callLocalModel(rawBaseUrl, model, tabs, customInstructions, exist
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
-        console.error('[Smart Tab Organiser] Local model error:', response.status, error);
-        throw new Error(error.error?.message || error.message || `Local model server error: ${response.status}`);
+        const errorBody = await readErrorResponseBody(response);
+        const message = extractProviderErrorMessage(errorBody) || `Local model server returned HTTP ${response.status}`;
+        console.error('[Smart Tab Organiser] Local model error:', response.status, message, errorBody);
+        throw new AiProviderError({
+          provider: 'local',
+          status: response.status,
+          message,
+          rawBody: errorBody,
+        });
       }
 
       content = await readOpenAiCompatibleChatResponse(response);

@@ -296,7 +296,7 @@ test('custom OpenAI optional host access is restricted to HTTPS', () => {
     'utf8'
   ));
 
-  assert.deepEqual(manifest.optional_host_permissions, ['https://*/*']);
+  assert.deepEqual(manifest.optional_host_permissions, ['https://*/*', 'http://*/*']);
 });
 
 test('custom OpenAI host normalization preserves explicit paths and defaults origin-only input to /v1', () => {

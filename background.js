@@ -3175,10 +3175,10 @@ async function requireLocalModelHostPermission(baseUrl, requestIfMissing = false
  * Returns whether access is available; a denial never stops organization.
  */
 async function grantLocalModelHostPermissionForUserGesture(settings) {
-  const localCanJoin = settings.aiProvider === 'local'
-    || (settings.aiProvider === 'chrome-ai'
-      && settings.aiFallbackEnabled === true
-      && !!settings.localModel?.trim());
+  const hasModel = !!settings.localModel?.trim();
+  const localCanJoin = hasModel
+    && (settings.aiProvider === 'local'
+      || (settings.aiProvider === 'chrome-ai' && settings.aiFallbackEnabled === true));
   if (!localCanJoin) return false;
 
   const baseUrl = normalizeLocalBaseUrl(settings.localBaseUrl);

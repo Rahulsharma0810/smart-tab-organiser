@@ -795,49 +795,6 @@ test('describeProviderChain message loads the local base URL for its status', as
   assert.equal(localEntry.status, 'missing-host-permission');
 });
 
-test('organizeTabs requests custom host permission before any grouping mutation', async () => {
-  const { chrome, context } = loadBackground();
-  const tabs = [
-    { id: 1, index: 0, pinned: false, groupId: -1, windowId: 1, title: 'One', url: 'https://example.com/one' },
-    { id: 2, index: 1, pinned: false, groupId: -1, windowId: 1, title: 'Two', url: 'https://example.com/two' },
-  ];
-  const callOrder = [];
-
-  chrome.storage.local.get = async () => ({
-    aiProvider: 'custom-openai',
-    aiFallbackEnabled: false,
-    customOpenaiBaseUrl: 'https://api.example.com/v1',
-    customOpenaiModel: 'model-a',
-    customOpenaiKey: 'key',
-  });
-  chrome.permissions.contains = async () => {
-    callOrder.push('contains');
-    return false;
-  };
-  chrome.permissions.request = async () => {
-    callOrder.push('request');
-    return false;
-  };
-  chrome.tabs.query = async (queryInfo = {}) => {
-    if (Object.prototype.hasOwnProperty.call(queryInfo, 'groupId')) return [];
-    return tabs.map((tab) => ({ ...tab }));
-  };
-  chrome.tabGroups.query = async () => [];
-  chrome.tabs.ungroup = async () => {
-    callOrder.push('ungroup');
-  };
-  context.fetch = async () => {
-    throw new Error('fetch should not run when permission is denied');
-  };
-
-  const result = await context.organizeTabs(false, false, '', 1, 1, [], true);
-  assert.equal(result.success, false);
-  assert.match(result.error, /OpenAI Compatible API Host is not configured\./);
-  assert.match(result.error, /Fetch models/);
-  assert.equal(callOrder.includes('ungroup'), false);
-  assert.equal(callOrder.includes('request'), true);
-  assert.equal(callOrder.at(-1), 'contains');
-});
 
 test('automatic organization never prompts for host access', async () => {
   const { chrome, context } = loadBackground();
@@ -2677,4 +2634,135 @@ test('organizeTabs rejects Chrome AI groups without a tabIndices array', async (
     assert.equal(result.failures.length, 1, response);
     assert.match(result.failures[0].detail, /Invalid response format from Chrome built-in AI/, response);
   }
+});
+
+test('a disallowed local address stops before any tab mutation', async () => {
+  const { chrome, context } = loadBackground();
+  const tabs = [
+    { id: 1, index: 0, pinned: false, groupId: -1, windowId: 1, title: 'One', url: 'https://example.com/one' },
+    { id: 2, index: 1, pinned: false, groupId: -1, windowId: 1, title: 'Two', url: 'https://example.com/two' },
+    { id: 3, index: 2, pinned: false, groupId: -1, windowId: 1, title: 'Three', url: 'https://example.com/three' },
+  ];
+  let ungrouped = 0;
+
+  chrome.storage.local.get = async () => ({
+    aiProvider: 'local',
+    aiFallbackEnabled: false,
+    localModel: 'llama3.1:8b',
+    localBaseUrl: 'http://8.8.8.8:11434/v1',
+  });
+  chrome.permissions.contains = async () => true;
+  chrome.tabs.query = async (queryInfo = {}) => {
+    if (Object.prototype.hasOwnProperty.call(queryInfo, 'groupId')) return [];
+    return tabs.map((tab) => ({ ...tab }));
+  };
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.ungroup = async () => {
+    ungrouped += 1;
+  };
+  context.fetch = async () => {
+    throw new Error('fetch must not run for a blocked host');
+  };
+
+  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /local network/);
+  assert.equal(ungrouped, 0, 'a blocked address must not mutate tabs');
+});
+
+test('a user gesture asks for the custom host before any tab work', async () => {
+  const { chrome, context } = loadBackground();
+  const requests = [];
+
+  chrome.permissions.contains = async () => false;
+  chrome.permissions.request = async ({ origins }) => {
+    requests.push(origins[0]);
+    return false;
+  };
+
+  await context.grantHostAccessForUserGesture({
+    aiProvider: 'custom-openai',
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'model-a',
+  });
+
+  assert.deepEqual(requests, ['https://api.example.com/*']);
+});
+
+test('auto organization keeps a blocked local address out of the usable chain', async () => {
+  const { context } = loadBackground();
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'chrome-ai',
+    aiFallbackEnabled: true,
+    aiFallbackOrder: ['local'],
+    localModel: 'llama3.1:8b',
+    localBaseUrl: 'http://8.8.8.8:11434/v1',
+  });
+
+  const localEntry = description.entries.find((entry) => entry.provider === 'local');
+  assert.equal(localEntry.status, 'blocked-host');
+  assert.deepEqual(Array.from(description.chain), ['chrome-ai']);
+});
+
+test('local chain reports a disallowed address instead of ready', async () => {
+  const { context } = loadBackground();
+
+  const description = await context.describeProviderChain({
+    aiProvider: 'local',
+    aiFallbackEnabled: false,
+    localModel: 'llama3.1:8b',
+    localBaseUrl: 'http://8.8.8.8:11434/v1',
+  });
+
+  const entry = description.entries.find((item) => item.provider === 'local');
+  assert.equal(entry.status, 'primary');
+  assert.equal(
+    await context.providerConfigurationStatus('local', {
+      localModel: 'llama3.1:8b',
+      localBaseUrl: 'http://8.8.8.8:11434/v1',
+    }),
+    'blocked-host'
+  );
+});
+
+test('organizeTabs never asks for host access itself', async () => {
+  const { chrome, context } = loadBackground();
+  const tabs = [
+    { id: 1, index: 0, pinned: false, groupId: -1, windowId: 1, title: 'One', url: 'https://example.com/one' },
+    { id: 2, index: 1, pinned: false, groupId: -1, windowId: 1, title: 'Two', url: 'https://example.com/two' },
+  ];
+  let requests = 0;
+  let ungrouped = 0;
+
+  chrome.storage.local.get = async () => ({
+    aiProvider: 'custom-openai',
+    aiFallbackEnabled: false,
+    customOpenaiBaseUrl: 'https://api.example.com/v1',
+    customOpenaiModel: 'model-a',
+    customOpenaiKey: 'key',
+  });
+  chrome.permissions.contains = async () => false;
+  chrome.permissions.request = async () => {
+    requests += 1;
+    return true;
+  };
+  chrome.tabs.query = async (queryInfo = {}) => {
+    if (Object.prototype.hasOwnProperty.call(queryInfo, 'groupId')) return [];
+    return tabs.map((tab) => ({ ...tab }));
+  };
+  chrome.tabGroups.query = async () => [];
+  chrome.tabs.ungroup = async () => {
+    ungrouped += 1;
+  };
+  context.fetch = async () => {
+    throw new Error('fetch should not run when permission is missing');
+  };
+
+  const result = await context.organizeTabs(false, false, '', 1, 1, []);
+  assert.equal(result.success, false);
+  assert.match(result.error, /Fetch models/);
+  assert.equal(requests, 0, 'the organizer must not prompt after its gesture window');
+  assert.equal(ungrouped, 0, 'no tab may be touched before the provider check');
 });

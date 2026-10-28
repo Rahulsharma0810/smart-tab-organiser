@@ -41,6 +41,8 @@ test('plain HTTP is allowed for loopback and private-network hosts', () => {
     'http://[::ffff:192.168.1.20]:11434/v1',
     'http://[0:0:0:0:0:ffff:c0a8:114]:11434/v1',
     'http://[::ffff:7f00:1]:11434/v1',   // IPv4-mapped loopback
+    'http://[::ffff:127.0.0.2]:11434/v1', // mapped 127/8, not just .1
+    'http://[::ffff:127.1.2.3]:11434/v1',
     'http://[fdff::1]:11434/v1',          // last address in fc00::/7
   ];
 

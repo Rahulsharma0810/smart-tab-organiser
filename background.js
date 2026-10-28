@@ -851,8 +851,7 @@ async function runOrganizeWithFeedback(windowId, options = {}) {
       customInstructions,
       preserveGroupsMinTabs,
       targetWindowId,
-      githubIssueSync.preservedTabIds,
-      options.requestHostPermission === true
+      githubIssueSync.preservedTabIds
     );
     chrome.notifications.clear('organize-progress');
     if (!result.success) {
@@ -1129,23 +1128,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // (or the full dedupe + AI organize flow when "Organize tabs on click" is enabled)
 chrome.action.onClicked.addListener(async (tab) => {
   try {
-    const {
-      organizeOnClick, githubLabelGroupsOnClick,
-      aiProvider, aiFallbackEnabled, localModel, localBaseUrl
-    } = await chrome.storage.local.get([
-      'organizeOnClick', 'githubLabelGroupsOnClick',
-      'aiProvider', 'aiFallbackEnabled', 'localModel', 'localBaseUrl'
+    const { organizeOnClick, githubLabelGroupsOnClick } = await chrome.storage.local.get([
+      'organizeOnClick', 'githubLabelGroupsOnClick'
     ]);
-    const options = {
-      includeLabelGroups: githubLabelGroupsOnClick !== false,
-      requestHostPermission: true, // Clicking the toolbar is a user gesture.
-    };
+    const options = { includeLabelGroups: githubLabelGroupsOnClick !== false };
     if (organizeOnClick === true) {
       // Before any tab work: the permission prompt needs this click's activation.
-      await grantLocalModelHostPermissionForUserGesture({
-        aiProvider, aiFallbackEnabled, localModel, localBaseUrl
-      });
-      await runOrganizeWithFeedback(tab?.windowId, options);
+      await runOrganizeFromUserGesture(tab?.windowId, options);
     } else {
       await runDedupeAndTidyPinned(tab?.windowId, options);
     }
@@ -3334,17 +3323,47 @@ async function grantLocalModelHostPermissionForUserGesture(settings) {
 }
 
 /**
+ * The same gesture-time prompt for a custom OpenAI-compatible host. Only asked
+ * when that provider can actually run in this chain, so a configured-but-unused
+ * host never triggers a dialog.
+ */
+async function grantCustomOpenAIHostPermissionForUserGesture(settings) {
+  if (!settings.customOpenaiBaseUrl?.trim() || !settings.customOpenaiModel?.trim()) return false;
+  const isPrimary = settings.aiProvider === 'custom-openai';
+  const isFallback = isLocalProvider(settings.aiProvider)
+    && settings.aiFallbackEnabled === true
+    && settings.aiAllowCloudFallback === true;
+  if (!isPrimary && !isFallback) return false;
+
+  try {
+    const baseUrl = normalizeCustomOpenAIBaseUrl(settings.customOpenaiBaseUrl);
+    await ensureCustomOpenAIHostPermission(baseUrl, true);
+    return true;
+  } catch (error) {
+    console.warn('[Smart Tab Organiser] Custom host access was not granted:', error?.message || error);
+    return false;
+  }
+}
+
+/** Every prompt a click-started run may need, before any tab work begins. */
+async function grantHostAccessForUserGesture(settings) {
+  const local = await grantLocalModelHostPermissionForUserGesture(settings);
+  const custom = await grantCustomOpenAIHostPermissionForUserGesture(settings);
+  return local || custom;
+}
+
+/**
  * Organize from a click or shortcut. Reads the settings the permission prompt
  * needs first, so the request still belongs to the gesture, then runs the same
  * flow as before.
  */
 async function runOrganizeFromUserGesture(windowId, options = {}) {
   const settings = await chrome.storage.local.get([
-    'aiProvider', 'aiFallbackEnabled', 'localModel', 'localBaseUrl'
+    'aiProvider', 'aiFallbackEnabled', 'aiAllowCloudFallback',
+    'localModel', 'localBaseUrl', 'customOpenaiBaseUrl', 'customOpenaiModel'
   ]);
-  await grantLocalModelHostPermissionForUserGesture(settings);
-  // requestHostPermission also covers the custom OpenAI host's prompt.
-  return runOrganizeWithFeedback(windowId, { requestHostPermission: true, ...options });
+  await grantHostAccessForUserGesture(settings);
+  return runOrganizeWithFeedback(windowId, options);
 }
 
 /** Turn a fetch failure against a local server into an actionable message. */
@@ -3946,12 +3965,13 @@ function providerHasKey(provider, settings) {
 /**
  * Host access status for the local model server. Loopback is always ready; a
  * server elsewhere on the network needs the permission "Test connection" grants.
- * An address that is neither stays 'ready' so the failure is reported when the
- * provider runs, where the message can name the address.
+ * An address the provider refuses (malformed, public, or shared address space)
+ * is 'blocked-host' and stays out of the usable chain, so no tab is touched
+ * before the error names the address.
  */
 async function localModelHostAccessStatus(rawBaseUrl) {
   const baseUrl = normalizeLocalBaseUrl(rawBaseUrl);
-  if (!isAllowedLocalModelUrl(baseUrl)) return 'ready';
+  if (!isAllowedLocalModelUrl(baseUrl)) return 'blocked-host';
   const parsed = new URL(baseUrl);
   if (globalThis.HostAccess.isStaticallyAllowedUrl(parsed)) return 'ready';
   const granted = await hasOriginPermission(globalThis.HostAccess.originPattern(parsed));
@@ -3978,10 +3998,14 @@ function providerStatusFixMessage(provider, status) {
     if (status === 'missing-base-url') return 'Set the OpenAI Compatible base URL in Smart Tab Organiser settings.';
     if (status === 'missing-model-name') return 'Set the OpenAI Compatible model name in Smart Tab Organiser settings.';
     if (status === 'invalid-base-url') return 'Enter a valid OpenAI Compatible base URL in Smart Tab Organiser settings.';
-    if (status === 'insecure-http-url') return 'Use HTTPS for remote OpenAI Compatible hosts. HTTP is allowed only for localhost or 127.0.0.1.';
+    if (status === 'insecure-http-url') return 'Use HTTPS for remote OpenAI Compatible hosts. ' + globalThis.HostAccess.ALLOWED_HTTP_HOSTS_HINT;
     if (status === 'missing-host-permission') return 'Open Options and click "Fetch models" for this host to grant access.';
   }
   if (provider === 'local') {
+    if (status === 'blocked-host') {
+      return 'Set the local model server to an address on this computer or your local network, '
+        + 'for example "http://localhost:11434". ' + globalThis.HostAccess.ALLOWED_HTTP_HOSTS_HINT;
+    }
     if (status === 'missing-host-permission') {
       return 'Open Options and click "Test connection" for the local model server, '
         + 'or start organization from the toolbar, to grant access to that host.';
@@ -4214,8 +4238,7 @@ async function organizeTabs(
   customInstructions,
   preserveGroupsMinTabs = 1,
   windowId,
-  additionalPreservedTabIds = [],
-  requestHostPermission = false
+  additionalPreservedTabIds = []
 ) {
   try {
     const minTabs = parseMinTabs(preserveGroupsMinTabs);
@@ -4250,21 +4273,10 @@ async function organizeTabs(
     const providerChain = await buildProviderChain(settings);
     let providerStatuses = await computeProviderStatuses(providerChain, settings);
     const primary = providerChain[0] || 'openai';
-    const primaryStatus = providerStatuses.find((entry) => entry.provider === primary)?.status || 'no-key';
 
-    if (requestHostPermission && primary === 'custom-openai' && primaryStatus === 'missing-host-permission') {
-      const baseUrl = normalizeCustomOpenAIBaseUrl(settings.customOpenaiBaseUrl || '');
-      try {
-        await ensureCustomOpenAIHostPermission(baseUrl, true);
-      } catch (_) {
-        // Keep status from a fresh check below so the error remains specific.
-      }
-      providerStatuses = await computeProviderStatuses(providerChain, settings);
-    }
-
-    // A LAN local model server is granted from the click handlers before this
-    // runs (see grantLocalModelHostPermissionForUserGesture), so this path stays
-    // check-only. A prompt here would come too late to own the user gesture.
+    // Host access is granted by the click handlers before this runs (see
+    // grantHostAccessForUserGesture), so this path only checks. Prompting here
+    // would come after synchronization and dedupe, too late to own the gesture.
 
     const usableChain = providerStatuses
       .filter((entry) => entry.status === 'ready')

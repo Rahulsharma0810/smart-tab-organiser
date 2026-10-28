@@ -121,12 +121,13 @@
   function isLoopbackIpv6(value) {
     var groups = parseIpv6(value);
     if (!groups) return false;
-    // ::1, and ::ffff:127.0.0.1
-    if (groups[7] !== 1) return false;
+    // ::ffff:127.0.0.0/104 uses the IPv4 loopback policy, so any 127/8 address.
+    var isMapped = groups[5] === 0xffff
+      && groups.slice(0, 5).every(function (group) { return group === 0; });
+    if (isMapped) return (groups[6] >> 8) === 127;
+    // ::1
     return groups.slice(0, 7).every(function (group) { return group === 0; })
-      || (groups[5] === 0xffff
-        && groups.slice(0, 5).every(function (group) { return group === 0; })
-        && (groups[6] >> 8) === 127);
+      && groups[7] === 1;
   }
 
   /** True for `localhost`, `*.localhost`, `127.0.0.0/8`, and IPv6 loopback. */

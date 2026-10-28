@@ -1380,17 +1380,48 @@ function parseExcludedDomains(value) {
   return Array.from(domains);
 }
 
-/** True when the tab's host is an excluded domain or one of its subdomains. */
-function isExcludedTab(tab, excludedDomains) {
-  if (!excludedDomains || excludedDomains.length === 0) return false;
+/** True when a URL's host is an excluded domain or one of its subdomains. */
+function urlMatchesExcludedDomain(rawUrl, excludedDomains) {
+  if (!rawUrl) return false;
   let hostname;
   try {
-    hostname = normalizeExcludedHostname(new URL(tab.url || tab.pendingUrl || '').hostname);
+    hostname = normalizeExcludedHostname(new URL(rawUrl).hostname);
   } catch (_) {
     return false;
   }
   if (!hostname) return false;
   return excludedDomains.some(domain => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
+/**
+ * True when either the committed or the pending URL is excluded. Chrome reports both while a
+ * navigation is in flight, so checking only `url || pendingUrl` would let a non-excluded current
+ * URL mask an excluded destination.
+ */
+function isExcludedTab(tab, excludedDomains) {
+  if (!excludedDomains || excludedDomains.length === 0) return false;
+  return urlMatchesExcludedDomain(tab.url, excludedDomains) ||
+    urlMatchesExcludedDomain(tab.pendingUrl, excludedDomains);
+}
+
+/** Recompute excluded tab ids from live tab state, for use right before moving tabs. */
+async function collectExcludedTabIds(windowId, excludedDomains) {
+  if (!excludedDomains || excludedDomains.length === 0) return new Set();
+  const tabs = await chrome.tabs.query(tabQueryForWindow(windowId));
+  return new Set(tabs.filter(tab => isExcludedTab(tab, excludedDomains)).map(tab => tab.id));
+}
+
+/**
+ * One eligibility rule for every tab the AI prompt may mention: pinned, split-view,
+ * excluded-domain, explicitly preserved, and extension-managed tabs never reach the model,
+ * whether they appear in the numbered list or as an existing-group sample.
+ */
+function isTabEligibleForAi(tab, { excludedDomains, additionalPreservedTabIdSet, alwaysPreservedGroupIds }) {
+  if (tab.pinned) return false;
+  if (isInSplitView(tab)) return false;
+  if (additionalPreservedTabIdSet.has(tab.id)) return false;
+  if (alwaysPreservedGroupIds.has(tab.groupId)) return false;
+  return !isExcludedTab(tab, excludedDomains);
 }
 
 async function getOrganizableTabs(windowId) {
@@ -1414,7 +1445,7 @@ async function filterExistingTabIds(tabIds) {
 }
 
 /** Keep only tabs that still match the snapshot sent to the AI provider. */
-async function filterUnchangedTabIds(tabIds, snapshotsById, windowId) {
+async function filterUnchangedTabIds(tabIds, snapshotsById, windowId, excludedDomains = null) {
   const unchanged = await Promise.all(
     tabIds.map(async (id) => {
       const snapshot = snapshotsById.get(id);
@@ -1428,6 +1459,8 @@ async function filterUnchangedTabIds(tabIds, snapshotsById, windowId) {
         const tabIsNavigating = tab.pendingUrl && tab.pendingUrl !== currentUrl;
         if (snapshotWasNavigating || tabIsNavigating) return null;
         if (tab.windowId !== windowId || tab.pinned || isInSplitView(tab)) return null;
+        // A tab may have committed to an excluded domain while the provider was answering.
+        if (excludedDomains && isExcludedTab(tab, excludedDomains)) return null;
         if (tab.groupId !== snapshot.groupId || currentUrl !== snapshotUrl) return null;
         return id;
       } catch (error) {
@@ -2795,12 +2828,13 @@ async function syncEnabledGitHubTabGroups(windowId, stages = {}) {
 function formatExistingGroupsForPrompt(existingGroups) {
   if (!existingGroups || existingGroups.length === 0) return '';
   const lines = existingGroups.map((group) => {
+    // Quote names exactly as stored so a model repeating the prompt value matches the real title.
     const samples = group.tabs.slice(0, 5).map(t =>
-      `"${(t.title || 'Untitled').replace(/"/g, "'")}"`
+      JSON.stringify(t.title || 'Untitled')
     );
     const more = group.tabs.length > 5 ? ` (+${group.tabs.length - 5} more)` : '';
     const sampleList = samples.length > 0 ? samples.join(', ') : '(no eligible tabs)';
-    return `Existing Group "${group.title}": ${group.tabs.length} tab(s) — ${sampleList}${more}`;
+    return `Existing Group ${JSON.stringify(group.title)}: ${group.tabs.length} tab(s) — ${sampleList}${more}`;
   }).join('\n');
   return `\n\nExisting Groups (merge ungrouped tabs from the list above into these groups when appropriate):
 ${lines}
@@ -2823,7 +2857,7 @@ function buildRefinePrompt(tabs, customInstructions, existingGroups = null, minG
     .map(group => (group.title || '').trim())
     .filter(Boolean);
   const groupList = groupNames.length > 0
-    ? groupNames.map(name => `- "${name.replace(/"/g, "'")}"`).join('\n')
+    ? groupNames.map(name => `- ${JSON.stringify(name)}`).join('\n')
     : '- (none)';
   const threshold = Math.max(1, minGroupSize);
 
@@ -3910,7 +3944,7 @@ async function computeProviderStatuses(providerChain, settings) {
  * tabs the model omitted are left alone. Existing groups are reused by exact title and
  * never renamed; only new groups must exceed the minimum size, otherwise tabs go to Misc.
  */
-async function applyRefinedGroups({ groups, tabsForAI, snapshots, windowId, groupTitleById, minTabs }) {
+async function applyRefinedGroups({ groups, tabsForAI, snapshots, windowId, groupTitleById, minTabs, excludedDomains = null }) {
   const targetByTabId = new Map();
   const targetNames = new Map();
   for (const group of groups) {
@@ -3947,7 +3981,7 @@ async function applyRefinedGroups({ groups, tabsForAI, snapshots, windowId, grou
   const miscTabIds = [...(movesByTarget.get('misc') || [])];
   movesByTarget.delete('misc');
   for (const [target, tabIds] of [...movesByTarget]) {
-    const liveTabIds = await filterUnchangedTabIds(tabIds, snapshots, windowId);
+    const liveTabIds = await filterUnchangedTabIds(tabIds, snapshots, windowId, excludedDomains);
     if (liveTabIds.length === 0) {
       movesByTarget.delete(target);
       continue;
@@ -3968,9 +4002,15 @@ async function applyRefinedGroups({ groups, tabsForAI, snapshots, windowId, grou
   let createdGroupCount = 0;
   for (const [target, tabIds] of movesByTarget) {
     // Re-check: a tab can still navigate or change group while the earlier moves run.
-    const liveTabIds = await filterUnchangedTabIds(tabIds, snapshots, windowId);
+    const liveTabIds = await filterUnchangedTabIds(tabIds, snapshots, windowId, excludedDomains);
     if (liveTabIds.length === 0) continue;
     const existingGroupId = existingGroupIdByName.get(target);
+    // A tab can drop out between the two checks, so reapply the new-group threshold here.
+    if (existingGroupId === undefined && target !== 'misc' && liveTabIds.length <= threshold) {
+      if (!movesByTarget.has('misc')) movesByTarget.set('misc', []);
+      movesByTarget.get('misc').push(...liveTabIds);
+      continue;
+    }
     if (existingGroupId !== undefined) {
       await chrome.tabs.group({ groupId: existingGroupId, tabIds: liveTabIds });
     } else {
@@ -4074,11 +4114,8 @@ async function organizeTabs(
     }
 
     const tabs = validTabs;
-    // Tabs on excluded domains are never ungrouped, sent to AI, or regrouped.
-    const excludedTabIdSet = new Set(
-      validTabs.filter(tab => isExcludedTab(tab, excludedDomains)).map(tab => tab.id)
-    );
-    const isExcluded = (tab) => excludedTabIdSet.has(tab.id) || isExcludedTab(tab, excludedDomains);
+    // Tabs on excluded domains are never ungrouped, sent to AI, or regrouped. Every check reads
+    // live tab state, so a tab that navigates mid-run is caught too.
     const additionalPreservedTabIdSet = new Set(
       (Array.isArray(additionalPreservedTabIds) ? additionalPreservedTabIds : [])
         .filter(Number.isInteger)
@@ -4126,12 +4163,19 @@ async function organizeTabs(
       const groupTabs = await chrome.tabs.query({ groupId: group.id });
       if (groupTabs.some((t) => isInSplitView(t))) continue;
       const liveIds = await filterExistingTabIds(
-        groupTabs.filter((t) => !isExcluded(t)).map((t) => t.id)
+        groupTabs.filter((t) => !isExcludedTab(t, excludedDomains)).map((t) => t.id)
       );
       if (liveIds.length > 0) {
         await chrome.tabs.ungroup(liveIds);
       }
     }
+
+    // Shared eligibility rule for the numbered list and for existing-group samples.
+    const aiEligibility = {
+      excludedDomains,
+      additionalPreservedTabIdSet,
+      alwaysPreservedGroupIds,
+    };
 
     // Get existing groups information (for merge — only preserved groups with > minTabs, excluding always-preserved)
     let existingGroupsInfo = [];
@@ -4145,8 +4189,8 @@ async function organizeTabs(
             id: group.id,
             title: group.title,
             color: group.color,
-            // Excluded tabs stay in the group but never reach the AI, not even as title samples.
-            tabs: groupTabs.filter((tab) => !isExcluded(tab))
+            // Samples use the same rule as the numbered list, so no ineligible tab's title leaks.
+            tabs: groupTabs.filter((tab) => isTabEligibleForAi(tab, aiEligibility))
           });
         }
       }
@@ -4162,11 +4206,7 @@ async function organizeTabs(
     // When preserving or merging, skip tabs already in a preserved group (prompt lists those separately).
     // When not preserving, every other organizable tab is eligible.
     const tabsForAI = validTabsAfterUngroup.filter((tab) => {
-      if (tab.pinned) return false;
-      if (isInSplitView(tab)) return false;
-      if (additionalPreservedTabIdSet.has(tab.id)) return false;
-      if (alwaysPreservedGroupIds.has(tab.groupId)) return false;
-      if (isExcluded(tab)) return false;
+      if (!isTabEligibleForAi(tab, aiEligibility)) return false;
       if (refine) {
         // Unnamed groups cannot be referenced by name, so their tabs stay put.
         return !(tab.groupId >= 0 && !groupTitleById.get(tab.groupId));
@@ -4270,10 +4310,13 @@ async function organizeTabs(
         windowId: validTabs[0].windowId,
         groupTitleById,
         minTabs,
+        excludedDomains,
       });
       const sortSettings = await chrome.storage.local.get(['sortTabsWithinGroupsByTitle']);
       if (sortSettings.sortTabsWithinGroupsByTitle === true) {
-        await sortTabsWithinGroupsByTitle(validTabs[0].windowId, alwaysPreservedGroupNames, excludedTabIdSet);
+        // Recompute from live tabs: a tab may have navigated to an excluded domain mid-run.
+        const liveExcludedTabIds = await collectExcludedTabIds(validTabs[0].windowId, excludedDomains);
+        await sortTabsWithinGroupsByTitle(validTabs[0].windowId, alwaysPreservedGroupNames, liveExcludedTabIds);
       }
       return {
         success: true,
@@ -4311,7 +4354,8 @@ async function organizeTabs(
     const currentWindowTabIds = new Set(await filterUnchangedTabIds(
       tabsForAI.map(tab => tab.id),
       tabsForAISnapshots,
-      currentWindowId
+      currentWindowId,
+      excludedDomains
     ));
 
     // Create or update tab groups
@@ -4352,7 +4396,7 @@ async function organizeTabs(
         })
         .filter(id => id !== null && !usedTabIndices.has(id) && currentWindowTabIds.has(id));
 
-      const liveTabIds = await filterUnchangedTabIds(tabIds, tabsForAISnapshots, currentWindowId);
+      const liveTabIds = await filterUnchangedTabIds(tabIds, tabsForAISnapshots, currentWindowId, excludedDomains);
       if (liveTabIds.length === 0) {
         continue;
       }
@@ -4381,7 +4425,8 @@ async function organizeTabs(
         const newTabIds = await filterUnchangedTabIds(
           liveTabIds.filter((id) => !existingTabIdSet.has(id) && currentWindowTabIds.has(id)),
           tabsForAISnapshots,
-          currentWindowId
+          currentWindowId,
+          excludedDomains
         );
         if (newTabIds.length > 0) {
           await chrome.tabs.group({ groupId: existingGroupId, tabIds: newTabIds });
@@ -4426,7 +4471,8 @@ async function organizeTabs(
     const liveMiscTabIds = await filterUnchangedTabIds(
       miscTabIds,
       tabsForAISnapshots,
-      currentWindowId
+      currentWindowId,
+      excludedDomains
     );
     if (liveMiscTabIds.length > 0) {
       const existingMiscGroupId = existingGroupMap.get('misc');
@@ -4440,7 +4486,8 @@ async function organizeTabs(
         const newMiscTabIds = await filterUnchangedTabIds(
           liveMiscTabIds.filter((id) => !existingTabIdSet.has(id) && currentWindowTabIds.has(id)),
           tabsForAISnapshots,
-          currentWindowId
+          currentWindowId,
+          excludedDomains
         );
         if (newMiscTabIds.length > 0) {
           await chrome.tabs.group({ groupId: existingMiscGroupId, tabIds: newMiscTabIds });
@@ -4466,7 +4513,9 @@ async function organizeTabs(
 
     const sortSettings = await chrome.storage.local.get(['sortTabsWithinGroupsByTitle']);
     if (sortSettings.sortTabsWithinGroupsByTitle === true) {
-      await sortTabsWithinGroupsByTitle(currentWindowId, alwaysPreservedGroupNames, excludedTabIdSet);
+      // Recompute from live tabs: a tab may have navigated to an excluded domain mid-run.
+      const liveExcludedTabIds = await collectExcludedTabIds(currentWindowId, excludedDomains);
+      await sortTabsWithinGroupsByTitle(currentWindowId, alwaysPreservedGroupNames, liveExcludedTabIds);
     }
 
     return {

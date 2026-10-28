@@ -3543,7 +3543,15 @@ function parseChromeAiGroupsResponse(content) {
     return parseAiGroupsResponse(text);
   }
   if (!Array.isArray(parsed)) return parseAiGroupsResponse(text);
-  if (!parsed.every(group => group && typeof group === 'object' && typeof group.groupName === 'string')) {
+  // A group without a tabIndices array is malformed, not an empty group: only an
+  // explicit [] may feed the valid-empty path, so a broken response can still fail
+  // over to another provider instead of silently sending every tab to Misc.
+  if (!parsed.every(group =>
+    group &&
+    typeof group === 'object' &&
+    typeof group.groupName === 'string' &&
+    Array.isArray(group.tabIndices)
+  )) {
     return null;
   }
   return parsed

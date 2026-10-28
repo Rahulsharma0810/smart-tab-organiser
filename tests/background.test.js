@@ -1701,3 +1701,22 @@ test('organizeTabs still fails when a Chrome AI response is not a tab-group arra
   assert.equal(result.failures.length, 1);
   assert.match(result.failures[0].detail, /Invalid response format from Chrome built-in AI/);
 });
+
+test('organizeTabs rejects Chrome AI groups without a tabIndices array', async () => {
+  const responses = [
+    '[{"groupName":"Broken"}]',
+    '[{"groupName":"Broken","tabIndices":null}]',
+    '[{"groupName":"Broken","tabIndices":"1,2"}]',
+  ];
+
+  for (const response of responses) {
+    const world = setupChromeAiOrganize(2, [response]);
+
+    const result = await world.context.organizeTabs(false, false, '', 1, 1, []);
+
+    assert.equal(result.success, false, response);
+    assert.equal(world.groupedTabIds.length, 0, response);
+    assert.equal(result.failures.length, 1, response);
+    assert.match(result.failures[0].detail, /Invalid response format from Chrome built-in AI/, response);
+  }
+});

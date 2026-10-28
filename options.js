@@ -525,6 +525,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     'missing-host-permission': 'Needs host permission',
     'not-downloaded': 'Model not downloaded',
     'no-model-name': 'No model name',
+    'blocked-host': 'Unsupported address',
     'cloud-opt-in-off': 'Needs cloud fallback opt-in',
     'not-after-cloud': 'Not used after a cloud primary',
     disabled: ''
@@ -634,6 +635,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (statusByProvider.get('local') === 'no-model-name') {
         parts.push('Set a local model name to enable the local fallback.');
       }
+      if (statusByProvider.get('local') === 'blocked-host') {
+        parts.push('The local model server must be on this computer or your local network.');
+      }
       if (statusByProvider.get('chrome-ai') === 'not-downloaded') {
         parts.push('Chrome built-in AI joins the chain once its model is downloaded.');
       }
@@ -717,6 +721,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   localBaseUrlInput.addEventListener('input', () => {
     chrome.storage.local.set({ localBaseUrl: localBaseUrlInput.value.trim() });
+    scheduleFallbackUiRefresh(); // the chain shows this host's access state
   });
 
   localModelInput.addEventListener('input', () => {
@@ -766,6 +771,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       localModelStatus.className = 'status error';
     } finally {
       testLocalModelBtn.disabled = false;
+      // A granted or revoked origin changes the fallback chain's status.
+      scheduleFallbackUiRefresh();
     }
   });
 
@@ -1137,6 +1144,23 @@ document.addEventListener('DOMContentLoaded', async () => {
       const preserveGroupsMinTabs = Number.isFinite(minTabsParsed) && minTabsParsed >= 0 ? minTabsParsed : 1;
       const mergeIntoExisting = mergeIntoExistingCheckbox.checked;
       const customInstructions = customInstructionsOptions.value.trim();
+
+      // This click owns the gesture, so grant every host the run may need before
+      // the service worker starts synchronization or tab work. Only providers
+      // that can actually run in this chain are asked, so no stray dialog.
+      const primaryProvider = aiProviderSelect.value || 'openai';
+      const fallbackOn = aiFallbackEnabledCheckbox.checked;
+      const localEligible = LOCAL_PROVIDERS_OPTIONS.includes(primaryProvider)
+        && !!localModelInput.value.trim()
+        && (primaryProvider === 'local' || fallbackOn);
+      const customEligible = !!customOpenaiBaseUrlInput.value.trim()
+        && !!customOpenaiModelInput.value.trim()
+        && (primaryProvider === 'custom-openai'
+          || (LOCAL_PROVIDERS_OPTIONS.includes(primaryProvider)
+            && fallbackOn
+            && aiAllowCloudFallbackCheckbox.checked));
+      if (localEligible) await requestLocalHostPermissionIfNeeded(localBaseUrlInput.value.trim());
+      if (customEligible) await requestCustomHostPermissionIfNeeded(customOpenaiBaseUrlInput.value.trim());
 
       const result = await chrome.runtime.sendMessage({
         action: 'organizeTabs',
